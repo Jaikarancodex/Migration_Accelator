@@ -26,13 +26,16 @@ dev = [
 spark = [
     "pyspark>=3.5",
 ]
+app = [
+    "streamlit>=1.35",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["ingest*", "repo*", "llm*", "convert*", "functions*", "eval*", "deploy*", "feedback*"]
+include = ["ingest*", "repo*", "llm*", "convert*", "functions*", "eval*", "deploy*", "feedback*", "app*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -46,8 +49,16 @@ target-version = "py311"
 select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+# Streamlit entrypoint needs sys.path set up before importing project packages.
+"app/streamlit_app.py" = ["E402"]
+
 [tool.mypy]
-python_version = "3.11"
+# Kept >= numpy's stub floor (PEP 695 `type` statements need 3.12 to parse)
+# even though requires-python is ">=3.11" -- numpy is a transitive dep via
+# streamlit/pyspark -> pandas, not something first-party code relies on
+# 3.12-only syntax for.
+python_version = "3.12"
 strict = true
 ignore_missing_imports = true
-exclude = ["tests/fixtures"]
+exclude = ["tests/fixtures", "\\.venv"]

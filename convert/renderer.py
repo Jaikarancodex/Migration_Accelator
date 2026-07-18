@@ -119,7 +119,7 @@ def _render_write(step: WriteStep) -> str:
             f"# TODO: mode={step.mode!r} is not yet rendered (needs a MERGE INTO statement).\n"
             f"{_var(step.id)} = {_var(step.input)}  # target_table={step.target_table}"
         )
-    return f'{_var(step.id)}.write.mode({step.mode!r}).saveAsTable("{step.target_table}")'
+    return f'{_var(step.input)}.write.mode({step.mode!r}).saveAsTable("{step.target_table}")'
 
 
 _RENDERERS: dict[type, Callable[[Any], str]] = {

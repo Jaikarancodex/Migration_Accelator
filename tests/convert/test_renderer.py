@@ -121,7 +121,10 @@ def test_render_call_function_step() -> None:
 
 def test_render_write_step() -> None:
     source = render_pyspark(_full_spec())
-    assert 'df_out.write.mode(\'overwrite\').saveAsTable("main.migration_dev.sales_summary")' in source
+    assert 'df_audited.write.mode(\'overwrite\').saveAsTable("main.migration_dev.sales_summary")' in source
+    # df_out is never assigned; the write must act on the input dataframe, not a var named after
+    # the write step's own id, or the generated code raises NameError at runtime.
+    assert "df_out." not in source
 
 
 def test_render_merge_mode_emits_todo_not_crash() -> None:

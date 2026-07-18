@@ -91,6 +91,29 @@ ruff check .                    # clean
 mypy .                          # clean (strict mode)
 ```
 
+## Review app
+
+A Streamlit UI over the same pipeline, for engineers to walk a workflow
+through ingest -> convert -> review/edit the YAML spec -> rendered code ->
+synthetic-data preview -> generated DAB, without touching a terminal.
+
+```bash
+pip install -e ".[app]"
+streamlit run app/streamlit_app.py
+```
+
+- Defaults to the bundled sample `.yxmd`, or upload your own in the sidebar.
+- Conversion uses `AnthropicLLMClient` if `ANTHROPIC_API_KEY` is set; otherwise
+  it falls back to `app/offline_convert.py`, a rule-based 1:1 mapping from IR
+  nodes to spec steps (same shape the LLM produces) so the app is fully
+  explorable with no API key. This fallback is app-only tooling, not part of
+  the core `llm/convert.py` path.
+- The generated YAML spec is shown in an editable text area — the review step
+  before rendering, matching the project's human-in-the-loop mission.
+- The Parity tab previews synthetic rows only; it does not run a real
+  source-vs-target check, since that needs a Spark/Databricks runtime to
+  execute the rendered pipeline against (see Known limitations).
+
 ## Assumptions & defaults
 
 No sample `.yxmd` file, target catalog/schema naming, or Databricks workspace
@@ -175,5 +198,6 @@ migration-accelerator/
   deploy/            models.py, dab.py
   feedback/          store.py (stub)
   configs/           loader.py, models.py, target.yaml, deploy.yaml
+  app/               streamlit_app.py (review UI), offline_convert.py (no-API-key fallback)
   tests/             mirrors the package layout; tests/fixtures/alteryx has the sample .yxmd
 ```
