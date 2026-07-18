@@ -1,0 +1,4 @@
+# Default target naming for converted pipelines. Override per-object as needed.
+catalog: main
+schema_name: migration_dev
+layer: bronze

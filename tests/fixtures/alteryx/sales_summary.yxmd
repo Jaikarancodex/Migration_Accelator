@@ -1,0 +1,174 @@
+<?xml version="1.0"?>
+<AlteryxDocument yxmdVer="2023.1">
+  <Nodes>
+    <Node ToolID="1">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileInput.DbFileInput">
+        <Position x="54" y="54" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <File>legacy.sales.sales_raw</File>
+        </Configuration>
+        <Annotation>
+          <AnnotationText>Raw sales transactions</AnnotationText>
+        </Annotation>
+      </Properties>
+    </Node>
+    <Node ToolID="2">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.AlteryxSelect.AlteryxSelect">
+        <Position x="150" y="54" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <SelectFields>
+            <SelectField field="CustomerID" selected="True" type="Int32" />
+            <SelectField field="Amount" selected="True" rename="Amount" type="Double" />
+            <SelectField field="Quantity" selected="True" type="Int32" />
+            <SelectField field="Notes" selected="False" />
+          </SelectFields>
+        </Configuration>
+        <Annotation>
+          <AnnotationText>Drop Notes column</AnnotationText>
+        </Annotation>
+      </Properties>
+    </Node>
+    <Node ToolID="3">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Filter.Filter">
+        <Position x="246" y="54" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <Expression>[Amount] &gt; 0</Expression>
+        </Configuration>
+        <Annotation>
+          <AnnotationText>Drop non-positive amounts</AnnotationText>
+        </Annotation>
+      </Properties>
+    </Node>
+    <Node ToolID="4">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Formula.Formula">
+        <Position x="342" y="54" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <FormulaFields>
+            <FormulaField field="LineTotal" expression="[Amount] * [Quantity]" type="Double" />
+          </FormulaFields>
+        </Configuration>
+        <Annotation>
+          <AnnotationText>Compute line total</AnnotationText>
+        </Annotation>
+      </Properties>
+    </Node>
+    <Node ToolID="5">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileInput.DbFileInput">
+        <Position x="54" y="150" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <File>legacy.sales.customers</File>
+        </Configuration>
+        <Annotation>
+          <AnnotationText>Customer dimension</AnnotationText>
+        </Annotation>
+      </Properties>
+    </Node>
+    <Node ToolID="6">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Join.Join">
+        <Position x="438" y="102" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <JoinInfo connection="Left">
+            <Field field="CustomerID" />
+          </JoinInfo>
+          <JoinInfo connection="Right">
+            <Field field="CustomerID" />
+          </JoinInfo>
+        </Configuration>
+        <Annotation>
+          <AnnotationText>Join sales to customers</AnnotationText>
+        </Annotation>
+      </Properties>
+    </Node>
+    <Node ToolID="7">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Summarize.Summarize">
+        <Position x="534" y="102" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <SummarizeFields>
+            <SummarizeField field="CustomerID" action="GroupBy" rename="CustomerID" />
+            <SummarizeField field="Region" action="GroupBy" rename="Region" />
+            <SummarizeField field="LineTotal" action="Sum" rename="TotalSales" />
+            <SummarizeField field="LineTotal" action="Count" rename="TransactionCount" />
+          </SummarizeFields>
+        </Configuration>
+        <Annotation>
+          <AnnotationText>Aggregate sales by customer and region</AnnotationText>
+        </Annotation>
+      </Properties>
+    </Node>
+    <Node ToolID="8">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileOutput.DbFileOutput">
+        <Position x="630" y="102" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <File>legacy.sales.sales_summary</File>
+        </Configuration>
+        <Annotation>
+          <AnnotationText>Write sales summary</AnnotationText>
+        </Annotation>
+      </Properties>
+    </Node>
+    <Node ToolID="9">
+      <GuiSettings Plugin="AlteryxSpatialPluginsGui.RegEx.RegEx">
+        <Position x="342" y="198" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <Field>Notes</Field>
+          <Expression>[0-9]+</Expression>
+        </Configuration>
+        <Annotation>
+          <AnnotationText>Extract digits from Notes (unsupported tool, logged not converted)</AnnotationText>
+        </Annotation>
+      </Properties>
+    </Node>
+  </Nodes>
+  <Connections>
+    <Connection>
+      <Origin ToolID="1" Connection="Output" />
+      <Destination ToolID="2" Connection="Input" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="2" Connection="Output" />
+      <Destination ToolID="3" Connection="Input" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="3" Connection="True" />
+      <Destination ToolID="4" Connection="Input" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="4" Connection="Output" />
+      <Destination ToolID="6" Connection="Left" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="5" Connection="Output" />
+      <Destination ToolID="6" Connection="Right" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="6" Connection="Join" />
+      <Destination ToolID="7" Connection="Input" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="7" Connection="Output" />
+      <Destination ToolID="8" Connection="Input" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="3" Connection="True" />
+      <Destination ToolID="9" Connection="Input" />
+    </Connection>
+  </Connections>
+</AlteryxDocument>

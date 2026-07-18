@@ -1,0 +1,8 @@
+# Default Databricks Asset Bundle deployment targets.
+# Placeholder workspace hosts -- replace with real workspace URLs before deploying.
+bundle_name: migration-accelerator
+dev_host: https://adb-000000000000000.0.azuredatabricks.net
+staging_host: https://adb-000000000000000.0.azuredatabricks.net
+prod_host: https://adb-000000000000000.0.azuredatabricks.net
+catalog: main
+schema_name: migration

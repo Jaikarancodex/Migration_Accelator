@@ -1,0 +1,44 @@
+You are converting one Alteryx workflow into a Databricks PySpark pipeline
+YAML spec. Emit ONLY a YAML document that validates against the PipelineSpec
+schema described below — do not emit PySpark code directly, and do not wrap
+the YAML in prose or markdown fences.
+
+## PipelineSpec schema (informal)
+- name: str
+- language: "pyspark"
+- source: {system: str, object_name: str}
+- target: {catalog: str, schema: str, layer: "bronze"|"silver"|"gold"}
+- steps: ordered list of step objects, each with a unique `id` and one `op` of:
+  - read {id, source_table, alias}
+  - select {id, input, columns: [{column, rename?, drop?}]}
+  - filter {id, input, condition}
+  - with_columns {id, input, columns: [{name, expression}]}
+  - join {id, left, right, left_keys, right_keys, how, use_function?}
+  - aggregate {id, input, group_by, aggregations: [{column, func, alias}]}
+  - call_function {id, input, function, args: {}}
+  - write {id, input, target_table, mode}
+- functions_used: list of function names referenced via call_function or join.use_function
+
+## Reusable function library (prefer these over writing new logic)
+{{ function_signatures }}
+
+## Target location
+catalog: {{ target_catalog }}
+schema: {{ target_schema }}
+layer: {{ target_layer }}
+
+## Source Alteryx workflow: {{ workflow_name }}
+Nodes in topological order (upstream first). Each node's `tool_id` is what
+downstream nodes reference via `upstream_ids`.
+
+{{ nodes_description }}
+
+{% if unsupported_tools %}
+## Unsupported tools (skipped by the parser — do not attempt to convert these)
+{{ unsupported_tools }}
+{% endif %}
+
+Convert every supported node above into one or more spec steps, preserving
+the topological order and the transformation semantics exactly. Use
+`safe_join` for the Join node and `standardize_column_names` /
+`add_audit_columns` where they fit the medallion layer. Output the YAML now.

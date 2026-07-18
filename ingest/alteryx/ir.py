@@ -1,0 +1,121 @@
+"""Intermediate representation (IR) for a parsed Alteryx workflow.
+
+The parser never hands raw XML to the LLM. It extracts an ordered set of
+typed nodes plus their configuration into these pydantic models, which are
+what the rest of the pipeline (repo layer, conversion, LLM prompt) consumes.
+"""
+
+from __future__ import annotations
+
+from enum import StrEnum
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+
+class ToolType(StrEnum):
+    INPUT = "input"
+    SELECT = "select"
+    FILTER = "filter"
+    FORMULA = "formula"
+    JOIN = "join"
+    SUMMARIZE = "summarize"
+    OUTPUT = "output"
+    UNSUPPORTED = "unsupported"
+
+
+class FieldSelection(BaseModel):
+    """A single field's treatment in a Select tool."""
+
+    field: str
+    selected: bool = True
+    rename: str | None = None
+    new_type: str | None = None
+
+
+class FormulaExpression(BaseModel):
+    """A single new/updated field produced by a Formula tool."""
+
+    field: str
+    expression: str
+    data_type: str | None = None
+
+
+class JoinInput(BaseModel):
+    """One side of a Join tool (Alteryx joins have a Left and a Right input)."""
+
+    side: str  # "left" | "right"
+    keys: list[str]
+
+
+class SummarizeAction(BaseModel):
+    """One aggregation or group-by action in a Summarize tool."""
+
+    field: str
+    action: str  # e.g. "GroupBy", "Sum", "Count", "Avg", "Min", "Max"
+    rename: str | None = None
+
+
+class Node(BaseModel):
+    """A single tool in the Alteryx workflow, extracted into typed config."""
+
+    tool_id: str
+    tool_type: ToolType
+    raw_plugin: str = Field(description="Original Alteryx plugin name, for traceability")
+    upstream_ids: list[str] = Field(default_factory=list)
+
+    # tool-specific configuration; only the relevant fields are populated
+    connection: dict[str, Any] | None = None  # INPUT: connection string/path/table
+    table_name: str | None = None  # INPUT/OUTPUT
+    fields: list[FieldSelection] = Field(default_factory=list)  # SELECT
+    filter_expression: str | None = None  # FILTER (True-output predicate)
+    formulas: list[FormulaExpression] = Field(default_factory=list)  # FORMULA
+    join_inputs: list[JoinInput] = Field(default_factory=list)  # JOIN
+    summarize_actions: list[SummarizeAction] = Field(default_factory=list)  # SUMMARIZE
+    output_path: str | None = None  # OUTPUT
+
+    annotation: str | None = None
+    position: dict[str, float] = Field(default_factory=dict)
+
+
+class UnsupportedTool(BaseModel):
+    """A tool the parser encountered but does not know how to convert.
+
+    Logged rather than raising, so the rest of the workflow still parses.
+    """
+
+    tool_id: str
+    plugin: str
+    reason: str
+
+
+class Workflow(BaseModel):
+    """The full parsed representation of one .yxmd file."""
+
+    source_file: str
+    name: str
+    nodes: list[Node] = Field(default_factory=list)
+    unsupported: list[UnsupportedTool] = Field(default_factory=list)
+
+    def node_by_id(self, tool_id: str) -> Node | None:
+        return next((n for n in self.nodes if n.tool_id == tool_id), None)
+
+    def topological_order(self) -> list[Node]:
+        """Return nodes ordered so every node's upstream nodes precede it."""
+        visited: set[str] = set()
+        ordered: list[Node] = []
+        by_id = {n.tool_id: n for n in self.nodes}
+
+        def visit(node: Node) -> None:
+            if node.tool_id in visited:
+                return
+            visited.add(node.tool_id)
+            for up_id in node.upstream_ids:
+                up = by_id.get(up_id)
+                if up is not None:
+                    visit(up)
+            ordered.append(node)
+
+        for n in self.nodes:
+            visit(n)
+        return ordered
