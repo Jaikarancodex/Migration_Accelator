@@ -81,3 +81,34 @@ def default_bundle(
             "prod": DABTarget(mode="production", workspace_host=prod_host, catalog=catalog, schema=schema),
         },
     )
+
+
+def single_target_bundle(
+    bundle_name: str,
+    pipeline_name: str,
+    python_file: str,
+    workspace_host: str,
+    catalog: str,
+    schema: str,
+    target_name: str = "default",
+) -> DABBundle:
+    """A one-job, one-target bundle for a single free-tier workspace.
+
+    Databricks Free Edition is one workspace with no dev/staging/prod
+    promotion story, so `default_bundle`'s three-target model doesn't apply;
+    this collapses it to a single "development"-mode target.
+    """
+    from deploy.models import DABJob, DABTarget, DABTask
+
+    return DABBundle(
+        bundle_name=bundle_name,
+        job=DABJob(
+            name=f"{pipeline_name}_job",
+            tasks=[DABTask(task_key=pipeline_name, python_file=python_file)],
+        ),
+        targets={
+            target_name: DABTarget(
+                mode="development", workspace_host=workspace_host, catalog=catalog, schema=schema
+            ),
+        },
+    )

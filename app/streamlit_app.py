@@ -32,7 +32,7 @@ from configs.loader import load_yaml_config
 from configs.models import DeployDefaultsConfig, TargetDefaultsConfig
 from convert.renderer import render_pyspark
 from convert.spec import MedallionLayer, PipelineSpec, TargetRef
-from deploy.dab import build_databricks_yml, default_bundle
+from deploy.dab import build_databricks_yml, default_bundle, single_target_bundle
 from eval.schema import ColumnSchema, ColumnType, TableSchema
 from eval.synthetic import generate_synthetic_rows
 from ingest.alteryx.parser import parse_yxmd
@@ -246,21 +246,44 @@ with tab_deploy:
     else:
         selected = st.selectbox("Object", object_names, key="deploy_object")
         bundle_name = st.text_input("Bundle name", value=DEPLOY_DEFAULTS.bundle_name)
-        dev_host = st.text_input("Dev host", value=DEPLOY_DEFAULTS.dev_host)
-        staging_host = st.text_input("Staging host", value=DEPLOY_DEFAULTS.staging_host)
-        prod_host = st.text_input("Prod host", value=DEPLOY_DEFAULTS.prod_host)
+
+        deploy_style = st.radio(
+            "Target workspace",
+            ["Azure Databricks (dev / staging / prod)", "Databricks Free Edition (single workspace)"],
+        )
+
+        if deploy_style.startswith("Azure"):
+            dev_host = st.text_input("Dev host", value=DEPLOY_DEFAULTS.dev_host)
+            staging_host = st.text_input("Staging host", value=DEPLOY_DEFAULTS.staging_host)
+            prod_host = st.text_input("Prod host", value=DEPLOY_DEFAULTS.prod_host)
+        else:
+            free_host = st.text_input(
+                "Workspace host",
+                value="https://community.cloud.databricks.com",
+                help="Your Databricks Free Edition workspace URL.",
+            )
 
         if st.button("Generate databricks.yml"):
-            bundle = default_bundle(
-                bundle_name=bundle_name,
-                pipeline_name=selected,
-                python_file=f"{selected}.py",
-                dev_host=dev_host,
-                staging_host=staging_host,
-                prod_host=prod_host,
-                catalog=DEPLOY_DEFAULTS.catalog,
-                schema=DEPLOY_DEFAULTS.schema_name,
-            )
+            if deploy_style.startswith("Azure"):
+                bundle = default_bundle(
+                    bundle_name=bundle_name,
+                    pipeline_name=selected,
+                    python_file=f"{selected}.py",
+                    dev_host=dev_host,
+                    staging_host=staging_host,
+                    prod_host=prod_host,
+                    catalog=DEPLOY_DEFAULTS.catalog,
+                    schema=DEPLOY_DEFAULTS.schema_name,
+                )
+            else:
+                bundle = single_target_bundle(
+                    bundle_name=bundle_name,
+                    pipeline_name=selected,
+                    python_file=f"{selected}.py",
+                    workspace_host=free_host,
+                    catalog=DEPLOY_DEFAULTS.catalog,
+                    schema=DEPLOY_DEFAULTS.schema_name,
+                )
             yml_text = build_databricks_yml(bundle)
             st.code(yml_text, language="yaml")
             st.download_button("Download databricks.yml", data=yml_text, file_name="databricks.yml", mime="text/yaml")

@@ -2,7 +2,12 @@ from pathlib import Path
 
 import yaml
 
-from deploy.dab import build_databricks_yml, default_bundle, write_databricks_yml
+from deploy.dab import (
+    build_databricks_yml,
+    default_bundle,
+    single_target_bundle,
+    write_databricks_yml,
+)
 from deploy.models import DABBundle
 
 
@@ -44,3 +49,20 @@ def test_write_databricks_yml_creates_file(tmp_path: Path) -> None:
     assert output.exists()
     doc = yaml.safe_load(output.read_text(encoding="utf-8"))
     assert doc["bundle"]["name"] == "migration-accelerator"
+
+
+def test_single_target_bundle_has_exactly_one_development_target() -> None:
+    bundle = single_target_bundle(
+        bundle_name="migration-accelerator",
+        pipeline_name="sales_summary",
+        python_file="./pipelines/sales_summary.py",
+        workspace_host="https://community.cloud.databricks.com",
+        catalog="main",
+        schema="migration",
+    )
+    doc = yaml.safe_load(build_databricks_yml(bundle))
+
+    assert list(doc["targets"].keys()) == ["default"]
+    assert doc["targets"]["default"]["mode"] == "development"
+    assert doc["targets"]["default"]["workspace"]["host"] == "https://community.cloud.databricks.com"
+    assert doc["targets"]["default"]["variables"]["schema"] == "migration"
