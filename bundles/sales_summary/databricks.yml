@@ -1,0 +1,25 @@
+bundle:
+  name: migration-accelerator
+variables:
+  catalog:
+    description: Target catalog
+    default: workspace
+  schema:
+    description: Target schema
+    default: default
+resources:
+  jobs:
+    sales_summary_job:
+      name: sales_summary_job
+      tasks:
+      - task_key: sales_summary
+        notebook_task:
+          notebook_path: ./src/sales_summary.py
+targets:
+  default:
+    mode: development
+    workspace:
+      host: https://dbc-922a9e09-b3e2.cloud.databricks.com
+    variables:
+      catalog: workspace
+      schema: default

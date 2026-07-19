@@ -319,7 +319,7 @@ with tab_deploy:
         else:
             free_host = st.text_input(
                 "Workspace host",
-                value="https://community.cloud.databricks.com",
+                value="https://dbc-922a9e09-b3e2.cloud.databricks.com",
                 help="Your Databricks Free Edition workspace URL.",
             )
 

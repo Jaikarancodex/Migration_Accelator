@@ -53,8 +53,15 @@ def build_databricks_yml(bundle: DABBundle) -> str:
             }
         }
 
+    # Target-level variable overrides are only valid if the variables are
+    # declared at the top level; default them from the first target.
+    first_target = next(iter(bundle.targets.values()))
     doc: dict[str, Any] = {
         "bundle": {"name": bundle.bundle_name},
+        "variables": {
+            "catalog": {"description": "Target catalog", "default": first_target.catalog},
+            "schema": {"description": "Target schema", "default": first_target.schema_},
+        },
         "resources": resources,
         "targets": {
             env_name: {

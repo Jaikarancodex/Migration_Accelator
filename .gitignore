@@ -9,5 +9,6 @@ build/
 dist/
 .env
 migration_repo_output/
+.databricks/
 .coverage
 htmlcov/
