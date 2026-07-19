@@ -20,6 +20,7 @@ import re
 from convert.spec import (
     AggregateStep,
     Aggregation,
+    CleanseStep,
     ColumnSelection,
     ComputedColumn,
     DistinctStep,
@@ -186,6 +187,22 @@ class _Converter:
                 id=node.tool_id,
                 input=self._input_id(node),
                 column=node.record_id_field or "RecordID",
+            )
+
+        if node.tool_type == ToolType.CLEANSE:
+            if node.cleanse is None:
+                self._elided[node.tool_id] = self._input_id(node)
+                return None
+            return CleanseStep(
+                id=node.tool_id,
+                input=self._input_id(node),
+                columns=node.cleanse.columns,
+                trim=node.cleanse.trim,
+                collapse_whitespace=node.cleanse.collapse_whitespace,
+                remove_all_whitespace=node.cleanse.remove_all_whitespace,
+                nulls_to_blank=node.cleanse.nulls_to_blank,
+                numeric_nulls_to_zero=node.cleanse.numeric_nulls_to_zero,
+                case=node.cleanse.case,  # type: ignore[arg-type]
             )
 
         if node.tool_type == ToolType.SUMMARIZE:

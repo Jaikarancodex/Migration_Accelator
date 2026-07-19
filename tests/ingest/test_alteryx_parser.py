@@ -116,6 +116,65 @@ def test_dedupe_fixture_has_no_unsupported_tools() -> None:
     assert workflow.unsupported == []
 
 
+NOKIA_LS = Path(
+    r"C:\Users\JaikaranN\Desktop\Alteryx_sample(Nokia)\Alteryx Jobs_Shared(Nokia)"
+    r"\LS_Certifications_DEV_Load\LS_Certifications_DEV_Load.yxmd"
+)
+
+
+def test_cleanse_macro_parses_when_real_workflow_available() -> None:
+    if not NOKIA_LS.exists():
+        import pytest
+
+        pytest.skip("Nokia sample workflow not present on this machine")
+    workflow = parse_yxmd(NOKIA_LS)
+    cleanse_node = workflow.node_by_id("3")
+    assert cleanse_node is not None
+    assert cleanse_node.tool_type == ToolType.CLEANSE
+    assert cleanse_node.cleanse is not None
+    assert cleanse_node.cleanse.trim is True
+    assert cleanse_node.cleanse.nulls_to_blank is True
+    assert cleanse_node.cleanse.case is None  # dropdown set but enable-checkbox absent
+    assert cleanse_node.cleanse.columns is not None
+    assert "Candidate_Registry_ID" in cleanse_node.cleanse.columns
+
+
+def test_cleanse_pro_parses_from_inline_xml(tmp_path: Path) -> None:
+    xml = """<?xml version="1.0"?>
+<AlteryxDocument yxmdVer="2023.1">
+  <Nodes>
+    <Node ToolID="1">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DataCleansePro.DataCleansePro">
+        <Position x="1" y="1" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <RemoveLeadingAndTrailingWhitespace value="True" />
+          <Checkbox_ReplaceStringColumns value="True" />
+          <radioButton_ReplaceNullwithBlanks value="True" />
+          <Fields>
+            <Field value="name" selected="True" />
+            <Field value="age" selected="True" />
+          </Fields>
+          <CheckBox_ModifyCase value="True" />
+          <ModifyCase>upper</ModifyCase>
+        </Configuration>
+      </Properties>
+    </Node>
+  </Nodes>
+  <Connections />
+</AlteryxDocument>"""
+    path = tmp_path / "cleanse.yxmd"
+    path.write_text(xml, encoding="utf-8")
+    workflow = parse_yxmd(path)
+    node = workflow.node_by_id("1")
+    assert node is not None and node.cleanse is not None
+    assert node.cleanse.trim is True
+    assert node.cleanse.nulls_to_blank is True
+    assert node.cleanse.columns == ["name", "age"]
+    assert node.cleanse.case == "upper"
+
+
 def test_topological_order_respects_dependencies() -> None:
     workflow = parse_yxmd(FIXTURE)
     order = [n.tool_id for n in workflow.topological_order()]

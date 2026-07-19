@@ -23,6 +23,7 @@ class ToolType(StrEnum):
     SORT = "sort"
     UNIQUE = "unique"
     RECORD_ID = "record_id"
+    CLEANSE = "cleanse"
     SUMMARIZE = "summarize"
     OUTPUT = "output"
     UNSUPPORTED = "unsupported"
@@ -59,6 +60,18 @@ class SortField(BaseModel):
     descending: bool = False
 
 
+class CleanseConfig(BaseModel):
+    """Options extracted from a Data Cleansing macro (Cleanse.yxmc or DataCleansePro)."""
+
+    columns: list[str] | None = None  # None = all columns
+    trim: bool = False
+    collapse_whitespace: bool = False
+    remove_all_whitespace: bool = False
+    nulls_to_blank: bool = False
+    numeric_nulls_to_zero: bool = False
+    case: str | None = None  # "upper" | "lower" | "title"
+
+
 class SummarizeAction(BaseModel):
     """One aggregation or group-by action in a Summarize tool."""
 
@@ -85,6 +98,7 @@ class Node(BaseModel):
     sort_fields: list[SortField] = Field(default_factory=list)  # SORT
     unique_fields: list[str] = Field(default_factory=list)  # UNIQUE
     record_id_field: str | None = None  # RECORD_ID
+    cleanse: CleanseConfig | None = None  # CLEANSE
     summarize_actions: list[SummarizeAction] = Field(default_factory=list)  # SUMMARIZE
     output_path: str | None = None  # OUTPUT
 

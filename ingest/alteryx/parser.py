@@ -12,6 +12,7 @@ parses.
 from __future__ import annotations
 
 import contextlib
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from xml.etree.ElementTree import Element  # noqa: S405 - parsing done via defusedxml below
@@ -20,6 +21,7 @@ import structlog
 from defusedxml.ElementTree import parse as safe_parse
 
 from ingest.alteryx.ir import (
+    CleanseConfig,
     FieldSelection,
     FormulaExpression,
     JoinInput,
@@ -54,6 +56,7 @@ _PLUGIN_TOOL_TYPES: dict[str, ToolType] = {
     "Sort.Sort": ToolType.SORT,
     "Unique.Unique": ToolType.UNIQUE,
     "RecordID.RecordID": ToolType.RECORD_ID,
+    "DataCleansePro.DataCleansePro": ToolType.CLEANSE,
     "Summarize.Summarize": ToolType.SUMMARIZE,
     "DbFileOutput.DbFileOutput": ToolType.OUTPUT,
 }
@@ -163,6 +166,58 @@ def _parse_unique(config: Element) -> list[str]:
     return [f.get("field", "") for f in unique_fields.findall("Field") if f.get("field")]
 
 
+_VALID_CASES = ("upper", "lower", "title")
+
+
+def _parse_cleanse_macro(config: Element) -> CleanseConfig:
+    """Config of the classic Cleanse.yxmc macro (anonymous Value names)."""
+    values = {v.get("name", ""): (v.text or "").strip() for v in config.findall("Value")}
+
+    def flag(key: str) -> bool:
+        return values.get(key) == "True"
+
+    names = re.findall(r'"([^"]+)"', values.get("List Box (11)", ""))
+    columns = None if not names or "*Unknown" in names else names
+    case = values.get("Drop Down (81)", "none").lower()
+    return CleanseConfig(
+        columns=columns,
+        trim=flag("Check Box (84)"),
+        collapse_whitespace=flag("Check Box (117)"),
+        remove_all_whitespace=flag("Check Box (122)"),
+        nulls_to_blank=flag("Check Box (135)"),
+        numeric_nulls_to_zero=flag("Check Box (136)"),
+        case=case if flag("Check Box (132)") and case in _VALID_CASES else None,
+    )
+
+
+def _parse_cleanse_pro(config: Element) -> CleanseConfig:
+    """Config of the modern Data Cleanse Pro tool (named elements)."""
+
+    def flag(tag: str) -> bool:
+        elem = config.find(tag)
+        return elem is not None and elem.get("value") == "True"
+
+    columns: list[str] | None = None
+    fields_elem = config.find("Fields")
+    if fields_elem is not None:
+        names = [
+            f.get("value", "")
+            for f in fields_elem.findall("Field")
+            if f.get("selected") == "True"
+        ]
+        columns = None if "*Unknown" in names or not names else names
+    case = _text(config.find("ModifyCase")) or "none"
+    return CleanseConfig(
+        columns=columns,
+        trim=flag("RemoveLeadingAndTrailingWhitespace"),
+        collapse_whitespace=flag("RemoveTabsLineBreaksAndDuplicates"),
+        remove_all_whitespace=flag("RemoveAllWhitespaces"),
+        nulls_to_blank=flag("Checkbox_ReplaceStringColumns") and flag("radioButton_ReplaceNullwithBlanks"),
+        numeric_nulls_to_zero=flag("Checkbox_ReplaceNumericColumns") and flag("radioButton_ReplaceNullwithZero"),
+        case=case.lower() if flag("CheckBox_ModifyCase") and case.lower() in _VALID_CASES else None,
+    )
+
+
 def _parse_summarize(config: Element) -> list[SummarizeAction]:
     actions: list[SummarizeAction] = []
     summarize_fields = config.find("SummarizeFields")
@@ -186,6 +241,24 @@ def _parse_node(elem: Element, connections: dict[str, list[str]]) -> Node | Unsu
     properties = elem.find("Properties")
     config = properties.find("Configuration") if properties is not None else None
     annotation_elem = properties.find("Annotation/AnnotationText") if properties is not None else None
+
+    # Macro nodes reference a .yxmc instead of a plugin. The Data Cleansing
+    # macro is understood and converted into a generated utility; other
+    # macros stay unsupported until their inner workflow is converted.
+    engine = elem.find("EngineSettings")
+    macro = engine.get("Macro") if engine is not None else None
+    if macro and tool_type == ToolType.UNSUPPORTED:
+        if "cleanse" in macro.lower() and config is not None:
+            tool_type = ToolType.CLEANSE
+            plugin = f"Macro:{macro}"
+        else:
+            return UnsupportedTool(
+                tool_id=tool_id,
+                plugin=f"Macro:{macro}",
+                reason=f"Alteryx macro {macro!r} is not supported yet — convert its .yxmc "
+                "workflow separately or land its output in the placeholder table",
+                upstream_ids=connections.get(tool_id, []),
+            )
 
     if tool_type == ToolType.UNSUPPORTED or config is None:
         return UnsupportedTool(
@@ -220,6 +293,10 @@ def _parse_node(elem: Element, connections: dict[str, list[str]]) -> Node | Unsu
         node.unique_fields = _parse_unique(config)
     elif tool_type == ToolType.RECORD_ID:
         node.record_id_field = _text(config.find("FieldName")) or "RecordID"
+    elif tool_type == ToolType.CLEANSE:
+        node.cleanse = (
+            _parse_cleanse_macro(config) if plugin.startswith("Macro:") else _parse_cleanse_pro(config)
+        )
     elif tool_type == ToolType.SUMMARIZE:
         node.summarize_actions = _parse_summarize(config)
     elif tool_type == ToolType.OUTPUT:

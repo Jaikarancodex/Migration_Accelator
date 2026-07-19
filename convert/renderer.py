@@ -15,6 +15,7 @@ from convert.expr import alteryx_expr_to_spark
 from convert.spec import (
     AggregateStep,
     CallFunctionStep,
+    CleanseStep,
     DistinctStep,
     FilterStep,
     JoinStep,
@@ -106,6 +107,69 @@ def _render_sort(step: SortStep) -> str:
     return f"{_var(step.id)} = {_var(step.input)}.orderBy({orderings})"
 
 
+# Self-contained utility generated when a workflow used an Alteryx Data
+# Cleansing macro — emitted into the artifact itself so deployed code has no
+# dependency on this repo being installed on the cluster.
+_CLEANSE_UTILITY = '''
+def cleanse_columns(df, columns=None, trim=False, collapse_whitespace=False,
+                    remove_all_whitespace=False, nulls_to_blank=False,
+                    numeric_nulls_to_zero=False, case=None):
+    """Utility generated from an Alteryx Data Cleansing macro."""
+    from pyspark.sql import types as _T
+    numeric_types = (_T.IntegerType, _T.LongType, _T.FloatType, _T.DoubleType,
+                     _T.DecimalType, _T.ShortType, _T.ByteType)
+    string_cols = {f.name for f in df.schema.fields if isinstance(f.dataType, _T.StringType)}
+    numeric_cols = {f.name for f in df.schema.fields if isinstance(f.dataType, numeric_types)}
+    targets = list(columns) if columns is not None else list(df.columns)
+
+    out = df
+    for name in targets:
+        if name not in string_cols:
+            continue
+        col = F.col(name)
+        if trim:
+            col = F.trim(col)
+        if collapse_whitespace:
+            col = F.regexp_replace(col, r"\\s+", " ")
+        if remove_all_whitespace:
+            col = F.regexp_replace(col, r"\\s", "")
+        if case == "upper":
+            col = F.upper(col)
+        elif case == "lower":
+            col = F.lower(col)
+        elif case == "title":
+            col = F.initcap(col)
+        if nulls_to_blank:
+            col = F.coalesce(col, F.lit(""))
+        out = out.withColumn(name, col)
+    if numeric_nulls_to_zero:
+        subset = [name for name in targets if name in numeric_cols]
+        if subset:
+            out = out.fillna(0, subset=subset)
+    return out
+'''
+
+
+def _uses_cleanse(spec: PipelineSpec) -> bool:
+    return any(isinstance(step, CleanseStep) for step in spec.steps)
+
+
+def _render_cleanse(step: CleanseStep) -> str:
+    kwargs = []
+    if step.columns is not None:
+        kwargs.append(f"columns={step.columns!r}")
+    for flag in (
+        "trim", "collapse_whitespace", "remove_all_whitespace",
+        "nulls_to_blank", "numeric_nulls_to_zero",
+    ):
+        if getattr(step, flag):
+            kwargs.append(f"{flag}=True")
+    if step.case is not None:
+        kwargs.append(f"case={step.case!r}")
+    joined = (", " + ", ".join(kwargs)) if kwargs else ""
+    return f"{_var(step.id)} = cleanse_columns({_var(step.input)}{joined})"
+
+
 def _render_record_id(step: RecordIdStep) -> str:
     return (
         f'{_var(step.id)} = {_var(step.input)}.withColumn("{step.column}", '
@@ -165,6 +229,7 @@ _RENDERERS: dict[type, Callable[[Any], str]] = {
     SortStep: _render_sort,
     DistinctStep: _render_distinct,
     RecordIdStep: _render_record_id,
+    CleanseStep: _render_cleanse,
     AggregateStep: _render_aggregate,
     CallFunctionStep: _render_call_function,
     WriteStep: _render_write,
@@ -200,6 +265,8 @@ def render_pyspark(spec: PipelineSpec) -> str:
     imports = _function_imports(spec)
     if imports:
         parts.append("\n".join(imports))
+    if _uses_cleanse(spec):
+        parts.append(_CLEANSE_UTILITY)
     parts.append("\n\ndef run(spark) -> None:  # noqa: ANN001")
     body_lines = [_render_step(step) for step in spec.steps]
     indented = "\n".join("    " + line.replace("\n", "\n    ") for line in body_lines)
@@ -224,6 +291,8 @@ def render_databricks_notebook(spec: PipelineSpec) -> str:
 
     imports = ["from pyspark.sql import functions as F  # noqa: N812", *_function_imports(spec)]
     cells = ["\n".join(imports)]
+    if _uses_cleanse(spec):
+        cells.append(_CLEANSE_UTILITY.strip())
     cells.extend(_render_step(step) for step in spec.steps)
 
     header = (
@@ -282,6 +351,8 @@ def render_sdp(spec: PipelineSpec) -> str:
     imports = _function_imports(spec)
     if imports:
         parts.append("\n".join(imports))
+    if _uses_cleanse(spec):
+        parts.append(_CLEANSE_UTILITY)
 
     # Bronze: raw landing, one table per source.
     bronze_names: dict[str, str] = {}

@@ -112,6 +112,21 @@ class RecordIdStep(BaseModel):
     column: str = "RecordID"
 
 
+class CleanseStep(BaseModel):
+    """Data Cleansing macro converted to a generated cleanse_columns utility call."""
+
+    op: Literal["cleanse"] = "cleanse"
+    id: str
+    input: str
+    columns: list[str] | None = None  # None = all columns
+    trim: bool = False
+    collapse_whitespace: bool = False
+    remove_all_whitespace: bool = False
+    nulls_to_blank: bool = False
+    numeric_nulls_to_zero: bool = False
+    case: Literal["upper", "lower", "title"] | None = None
+
+
 class AggregateStep(BaseModel):
     op: Literal["aggregate"] = "aggregate"
     id: str
@@ -148,6 +163,7 @@ Step = Annotated[
     | SortStep
     | DistinctStep
     | RecordIdStep
+    | CleanseStep
     | AggregateStep
     | CallFunctionStep
     | WriteStep,

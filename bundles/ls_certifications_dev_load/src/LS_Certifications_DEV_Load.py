@@ -9,6 +9,45 @@ from pyspark.sql.window import Window
 
 # COMMAND ----------
 
+def cleanse_columns(df, columns=None, trim=False, collapse_whitespace=False,
+                    remove_all_whitespace=False, nulls_to_blank=False,
+                    numeric_nulls_to_zero=False, case=None):
+    """Utility generated from an Alteryx Data Cleansing macro."""
+    from pyspark.sql import types as _T
+    numeric_types = (_T.IntegerType, _T.LongType, _T.FloatType, _T.DoubleType,
+                     _T.DecimalType, _T.ShortType, _T.ByteType)
+    string_cols = {f.name for f in df.schema.fields if isinstance(f.dataType, _T.StringType)}
+    numeric_cols = {f.name for f in df.schema.fields if isinstance(f.dataType, numeric_types)}
+    targets = list(columns) if columns is not None else list(df.columns)
+
+    out = df
+    for name in targets:
+        if name not in string_cols:
+            continue
+        col = F.col(name)
+        if trim:
+            col = F.trim(col)
+        if collapse_whitespace:
+            col = F.regexp_replace(col, r"\s+", " ")
+        if remove_all_whitespace:
+            col = F.regexp_replace(col, r"\s", "")
+        if case == "upper":
+            col = F.upper(col)
+        elif case == "lower":
+            col = F.lower(col)
+        elif case == "title":
+            col = F.initcap(col)
+        if nulls_to_blank:
+            col = F.coalesce(col, F.lit(""))
+        out = out.withColumn(name, col)
+    if numeric_nulls_to_zero:
+        subset = [name for name in targets if name in numeric_cols]
+        if subset:
+            out = out.fillna(0, subset=subset)
+    return out
+
+# COMMAND ----------
+
 df_1 = spark.table("workspace.default.certifications")  # alias: certifications
 
 # COMMAND ----------
@@ -22,7 +61,11 @@ df_2 = df_19.select(F.col("Client ID").alias("Candidate_Registry_ID"), F.col("La
 
 # COMMAND ----------
 
-df_14 = df_2.withColumn("Certification_ID", F.row_number().over(Window.orderBy(F.monotonically_increasing_id())))
+df_3 = cleanse_columns(df_2, columns=['Candidate_Registry_ID', 'Candidate_Last_Name', 'Candidate_Middle_Name', 'Candidate_First_Name', 'Certification_Program_Name', 'Certification_Program_Status', 'Last_Updated_Date', 'Status_Effective_Date', 'Initial_Privileged_Date', 'Status_Expiration_Date', 'Issued_Certification_ID', 'Normalized_Name', 'Company', 'Candidate_Email', 'Country', 'Region', 'Nokia_ID', 'Program_Family'], trim=True, nulls_to_blank=True)
+
+# COMMAND ----------
+
+df_14 = df_3.withColumn("Certification_ID", F.row_number().over(Window.orderBy(F.monotonically_increasing_id())))
 
 # COMMAND ----------
 

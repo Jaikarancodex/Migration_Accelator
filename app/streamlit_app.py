@@ -146,7 +146,7 @@ FORMAT_ORDER: list[ArtifactFormat] = ["job", "notebook", "sdp"]
 
 tab_quick, tab_repo, tab_convert, tab_code, tab_parity, tab_deploy = st.tabs(
     [
-        ":rocket: Quick migrate",
+        "Quick migrate",
         "Repo & dependency graph",
         "Convert",
         "Generated code",
@@ -178,7 +178,7 @@ with tab_quick:
     if quick_env_token:
         qc2.caption("Token found in environment — no need to paste one.")
 
-    if st.button(":rocket: Migrate & deploy", type="primary", key="quick_go"):
+    if st.button("Migrate & deploy", type="primary", key="quick_go"):
         if quick_file is None:
             st.error("Upload a .yxmd file first.")
         elif not quick_token:
@@ -226,7 +226,7 @@ with tab_quick:
                 st.session_state["quick_last_bundle"] = str(quick_dir)
                 if workflow.unsupported:
                     with st.expander(
-                        f":warning: {len(workflow.unsupported)} tool(s) need manual follow-up"
+                        f"{len(workflow.unsupported)} tool(s) need manual follow-up"
                     ):
                         for u in workflow.unsupported:
                             m = lookup_by_plugin(u.plugin)
@@ -306,7 +306,7 @@ with tab_convert:
                 if mapping is not None:
                     st.caption(
                         f"[{u.tool_id}] **{mapping.tool}** ({mapping.category}) — {mapping.what_it_does} "
-                        f"\n\n:bulb: Manual Databricks conversion: {mapping.databricks_logic}"
+                        f"\n\nManual Databricks conversion: {mapping.databricks_logic}"
                     )
                 else:
                     st.caption(
@@ -517,7 +517,7 @@ with tab_deploy:
             if env_token:
                 st.caption("Using the DATABRICKS_TOKEN from the environment.")
 
-            if st.button(":rocket: Migrate & deploy to Databricks", type="primary"):
+            if st.button("Migrate & deploy to Databricks", type="primary"):
                 if not token:
                     st.error("A Databricks access token is required.")
                 else:

@@ -178,6 +178,33 @@ def test_render_union_sort_distinct_steps() -> None:
     assert 'df_ordered = df_deduped.orderBy(F.col("Region").asc(), F.col("Amount").desc())' in source
 
 
+def test_render_cleanse_emits_inline_utility_in_all_formats() -> None:
+    from convert.spec import CleanseStep
+
+    spec = PipelineSpec(
+        name="cleanse_case", language="pyspark", source=SOURCE, target=TARGET,
+        steps=[
+            ReadStep(id="r", source_table="t", alias="raw"),
+            CleanseStep(id="c", input="r", columns=["a"], trim=True, nulls_to_blank=True),
+            WriteStep(id="w", input="c", target_table="main.x.out", mode="overwrite"),
+        ],
+    )
+    job = render_pyspark(spec)
+    compile(job, "<generated>", "exec")
+    assert "def cleanse_columns(" in job
+    assert "df_c = cleanse_columns(df_r, columns=['a'], trim=True, nulls_to_blank=True)" in job
+
+    notebook = render_databricks_notebook(spec)
+    assert "def cleanse_columns(" in notebook
+
+    sdp = render_sdp(spec)
+    compile(sdp, "<generated>", "exec")
+    assert "def cleanse_columns(" in sdp
+    # the utility is called from inside the silver layer
+    silver = sdp.split('silver_cleanse_case"')[1].split("@dp.table")[0]
+    assert "cleanse_columns(" in silver
+
+
 def test_render_distinct_without_keys_uses_all_columns() -> None:
     spec = PipelineSpec(
         name="all_cols", language="pyspark", source=SOURCE, target=TARGET,

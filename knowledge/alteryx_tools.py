@@ -134,12 +134,14 @@ CATALOG: list[ToolMapping] = [
     ),
     ToolMapping(
         tool="Data Cleansing",
-        plugin_suffix="CleanseTool.CleanseTool",
+        plugin_suffix="DataCleansePro.DataCleansePro",
         category="Preparation",
-        what_it_does="Bulk-fixes nulls, whitespace, casing, and unwanted characters.",
-        databricks_logic="df.fillna(...) for nulls; F.trim / F.regexp_replace(col, r'\\s+', ' ') "
-        "for whitespace; F.upper/F.lower/F.initcap for casing; "
-        "F.regexp_replace(col, '[^0-9]', '') to strip non-numeric characters.",
+        what_it_does="Bulk-fixes nulls, whitespace, casing, and unwanted characters "
+        "(both the classic Cleanse.yxmc macro and Data Cleanse Pro).",
+        databricks_logic="Converted automatically into a generated cleanse_columns utility "
+        "(F.trim / regexp_replace for whitespace, coalesce/fillna for nulls, "
+        "upper/lower/initcap for casing) emitted into the artifact and called in the flow.",
+        parser_supported=True,
     ),
     ToolMapping(
         tool="Join",
