@@ -7,13 +7,17 @@ from convert.spec import (
     CallFunctionStep,
     ColumnSelection,
     ComputedColumn,
+    DistinctStep,
     FilterStep,
     JoinStep,
     PipelineSpec,
     ReadStep,
     SelectStep,
+    SortColumn,
+    SortStep,
     SourceRef,
     TargetRef,
+    UnionStep,
     WithColumnsStep,
     WriteStep,
 )
@@ -150,6 +154,39 @@ def test_render_rejects_non_pyspark_spec() -> None:
     )
     with pytest.raises(ValueError, match="sql"):
         render_pyspark(spec)
+
+
+def test_render_union_sort_distinct_steps() -> None:
+    spec = PipelineSpec(
+        name="dedupe_case", language="pyspark", source=SOURCE, target=TARGET,
+        steps=[
+            ReadStep(id="east", source_table="legacy.sales.orders_east", alias="east"),
+            ReadStep(id="west", source_table="legacy.sales.orders_west", alias="west"),
+            UnionStep(id="stacked", inputs=["east", "west"]),
+            DistinctStep(id="deduped", input="stacked", columns=["OrderID"]),
+            SortStep(
+                id="ordered", input="deduped",
+                columns=[SortColumn(column="Region"), SortColumn(column="Amount", descending=True)],
+            ),
+            WriteStep(id="out", input="ordered", target_table="main.x.orders", mode="overwrite"),
+        ],
+    )
+    source = render_pyspark(spec)
+    compile(source, "<generated>", "exec")
+    assert "df_stacked = df_east.unionByName(df_west, allowMissingColumns=True)" in source
+    assert 'df_deduped = df_stacked.dropDuplicates(["OrderID"])' in source
+    assert 'df_ordered = df_deduped.orderBy(F.col("Region").asc(), F.col("Amount").desc())' in source
+
+
+def test_render_distinct_without_keys_uses_all_columns() -> None:
+    spec = PipelineSpec(
+        name="all_cols", language="pyspark", source=SOURCE, target=TARGET,
+        steps=[
+            ReadStep(id="r", source_table="t", alias="t"),
+            DistinctStep(id="d", input="r"),
+        ],
+    )
+    assert "df_d = df_r.dropDuplicates()" in render_pyspark(spec)
 
 
 def test_render_notebook_has_cell_markers_and_no_run_wrapper() -> None:

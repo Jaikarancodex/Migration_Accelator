@@ -14,14 +14,18 @@ from convert.spec import (
     Aggregation,
     ColumnSelection,
     ComputedColumn,
+    DistinctStep,
     FilterStep,
     JoinStep,
     PipelineSpec,
     ReadStep,
     SelectStep,
+    SortColumn,
+    SortStep,
     SourceRef,
     Step,
     TargetRef,
+    UnionStep,
     WithColumnsStep,
     WriteStep,
 )
@@ -75,6 +79,21 @@ def _step_for_node(node: Node, target: TargetRef) -> Step | None:
             right_keys=right_keys,
             how="inner",
             use_function="safe_join",
+        )
+
+    if node.tool_type == ToolType.UNION:
+        inputs = node.upstream_ids if len(node.upstream_ids) >= 2 else [_input_id(node, node.tool_id)] * 2
+        return UnionStep(id=node.tool_id, inputs=inputs)
+
+    if node.tool_type == ToolType.SORT:
+        sort_columns = [SortColumn(column=f.field, descending=f.descending) for f in node.sort_fields]
+        if not sort_columns:
+            return None
+        return SortStep(id=node.tool_id, input=_input_id(node, node.tool_id), columns=sort_columns)
+
+    if node.tool_type == ToolType.UNIQUE:
+        return DistinctStep(
+            id=node.tool_id, input=_input_id(node, node.tool_id), columns=node.unique_fields
         )
 
     if node.tool_type == ToolType.SUMMARIZE:

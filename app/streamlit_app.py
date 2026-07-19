@@ -36,6 +36,7 @@ from deploy.dab import ArtifactFormat, build_databricks_yml, default_bundle, sin
 from eval.schema import ColumnSchema, ColumnType, TableSchema
 from eval.synthetic import generate_synthetic_rows
 from ingest.alteryx.parser import parse_yxmd
+from knowledge.alteryx_tools import lookup_by_plugin
 from llm.client import AnthropicLLMClient
 from llm.convert import SpecGenerationError, generate_pipeline_spec
 from llm.recommend import (
@@ -185,7 +186,14 @@ with tab_convert:
         if metadata.unsupported_tool_count:
             st.warning(f"{metadata.unsupported_tool_count} tool(s) were not recognized and were skipped:")
             for u in workflow.unsupported:
-                st.caption(f"[{u.tool_id}] {u.plugin} — {u.reason}")
+                mapping = lookup_by_plugin(u.plugin)
+                if mapping is not None:
+                    st.caption(
+                        f"[{u.tool_id}] **{mapping.tool}** ({mapping.category}) — {mapping.what_it_does} "
+                        f"\n\n:bulb: Manual Databricks conversion: {mapping.databricks_logic}"
+                    )
+                else:
+                    st.caption(f"[{u.tool_id}] {u.plugin} — {u.reason}")
 
         with st.expander("Parsed workflow nodes (topological order)", expanded=False):
             for node in workflow.topological_order():

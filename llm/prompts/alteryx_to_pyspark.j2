@@ -14,6 +14,9 @@ the YAML in prose or markdown fences.
   - filter {id, input, condition}
   - with_columns {id, input, columns: [{name, expression}]}
   - join {id, left, right, left_keys, right_keys, how, use_function?}
+  - union {id, inputs: [step ids]}  (stacks streams by column name)
+  - sort {id, input, columns: [{column, descending?}]}
+  - distinct {id, input, columns: [key columns; empty = all]}
   - aggregate {id, input, group_by, aggregations: [{column, func, alias}]}
   - call_function {id, input, function, args: {}}
   - write {id, input, target_table, mode}
@@ -21,6 +24,11 @@ the YAML in prose or markdown fences.
 
 ## Reusable function library (prefer these over writing new logic)
 {{ function_signatures }}
+
+{% if tool_knowledge %}
+## Alteryx -> Databricks tool knowledge (authoritative — follow this over general recall)
+{{ tool_knowledge }}
+{% endif %}
 
 ## Target location
 catalog: {{ target_catalog }}

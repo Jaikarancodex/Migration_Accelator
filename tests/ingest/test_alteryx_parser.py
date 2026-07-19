@@ -4,6 +4,7 @@ from ingest.alteryx.ir import ToolType
 from ingest.alteryx.parser import parse_yxmd
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "alteryx" / "sales_summary.yxmd"
+DEDUPE_FIXTURE = Path(__file__).parent.parent / "fixtures" / "alteryx" / "region_dedupe.yxmd"
 
 
 def test_parses_all_supported_nodes() -> None:
@@ -81,6 +82,38 @@ def test_upstream_ids_wired_from_connections() -> None:
     join_node = workflow.node_by_id("6")
     assert join_node is not None
     assert set(join_node.upstream_ids) == {"4", "5"}
+
+
+def test_union_node_wires_both_upstream_inputs() -> None:
+    workflow = parse_yxmd(DEDUPE_FIXTURE)
+    union_node = workflow.node_by_id("3")
+    assert union_node is not None
+    assert union_node.tool_type == ToolType.UNION
+    assert set(union_node.upstream_ids) == {"1", "2"}
+
+
+def test_unique_node_captures_key_fields() -> None:
+    workflow = parse_yxmd(DEDUPE_FIXTURE)
+    unique_node = workflow.node_by_id("4")
+    assert unique_node is not None
+    assert unique_node.tool_type == ToolType.UNIQUE
+    assert unique_node.unique_fields == ["OrderID"]
+
+
+def test_sort_node_captures_fields_and_direction() -> None:
+    workflow = parse_yxmd(DEDUPE_FIXTURE)
+    sort_node = workflow.node_by_id("5")
+    assert sort_node is not None
+    assert sort_node.tool_type == ToolType.SORT
+    assert [(f.field, f.descending) for f in sort_node.sort_fields] == [
+        ("Region", False),
+        ("Amount", True),
+    ]
+
+
+def test_dedupe_fixture_has_no_unsupported_tools() -> None:
+    workflow = parse_yxmd(DEDUPE_FIXTURE)
+    assert workflow.unsupported == []
 
 
 def test_topological_order_respects_dependencies() -> None:

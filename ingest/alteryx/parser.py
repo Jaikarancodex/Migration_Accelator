@@ -23,6 +23,7 @@ from ingest.alteryx.ir import (
     FormulaExpression,
     JoinInput,
     Node,
+    SortField,
     SummarizeAction,
     ToolType,
     UnsupportedTool,
@@ -39,6 +40,9 @@ _PLUGIN_TOOL_TYPES: dict[str, ToolType] = {
     "Filter.Filter": ToolType.FILTER,
     "Formula.Formula": ToolType.FORMULA,
     "Join.Join": ToolType.JOIN,
+    "Union.Union": ToolType.UNION,
+    "Sort.Sort": ToolType.SORT,
+    "Unique.Unique": ToolType.UNIQUE,
     "Summarize.Summarize": ToolType.SUMMARIZE,
     "DbFileOutput.DbFileOutput": ToolType.OUTPUT,
 }
@@ -126,6 +130,28 @@ def _parse_join(config: Element) -> list[JoinInput]:
     return joins
 
 
+def _parse_sort(config: Element) -> list[SortField]:
+    fields: list[SortField] = []
+    sort_info = config.find("SortInfo")
+    if sort_info is None:
+        return fields
+    for f in sort_info.findall("Field"):
+        field_name = f.get("field")
+        if not field_name:
+            continue
+        fields.append(
+            SortField(field=field_name, descending=f.get("order", "Ascending") == "Descending")
+        )
+    return fields
+
+
+def _parse_unique(config: Element) -> list[str]:
+    unique_fields = config.find("UniqueFields")
+    if unique_fields is None:
+        return []
+    return [f.get("field", "") for f in unique_fields.findall("Field") if f.get("field")]
+
+
 def _parse_summarize(config: Element) -> list[SummarizeAction]:
     actions: list[SummarizeAction] = []
     summarize_fields = config.find("SummarizeFields")
@@ -176,6 +202,10 @@ def _parse_node(elem: Element, connections: dict[str, list[str]]) -> Node | Unsu
         node.formulas = _parse_formula(config)
     elif tool_type == ToolType.JOIN:
         node.join_inputs = _parse_join(config)
+    elif tool_type == ToolType.SORT:
+        node.sort_fields = _parse_sort(config)
+    elif tool_type == ToolType.UNIQUE:
+        node.unique_fields = _parse_unique(config)
     elif tool_type == ToolType.SUMMARIZE:
         node.summarize_actions = _parse_summarize(config)
     elif tool_type == ToolType.OUTPUT:

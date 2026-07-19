@@ -19,6 +19,9 @@ class ToolType(StrEnum):
     FILTER = "filter"
     FORMULA = "formula"
     JOIN = "join"
+    UNION = "union"
+    SORT = "sort"
+    UNIQUE = "unique"
     SUMMARIZE = "summarize"
     OUTPUT = "output"
     UNSUPPORTED = "unsupported"
@@ -48,6 +51,13 @@ class JoinInput(BaseModel):
     keys: list[str]
 
 
+class SortField(BaseModel):
+    """One column's ordering in a Sort tool."""
+
+    field: str
+    descending: bool = False
+
+
 class SummarizeAction(BaseModel):
     """One aggregation or group-by action in a Summarize tool."""
 
@@ -71,6 +81,8 @@ class Node(BaseModel):
     filter_expression: str | None = None  # FILTER (True-output predicate)
     formulas: list[FormulaExpression] = Field(default_factory=list)  # FORMULA
     join_inputs: list[JoinInput] = Field(default_factory=list)  # JOIN
+    sort_fields: list[SortField] = Field(default_factory=list)  # SORT
+    unique_fields: list[str] = Field(default_factory=list)  # UNIQUE
     summarize_actions: list[SummarizeAction] = Field(default_factory=list)  # SUMMARIZE
     output_path: str | None = None  # OUTPUT
 

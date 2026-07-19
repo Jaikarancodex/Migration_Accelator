@@ -15,12 +15,15 @@ from convert.expr import alteryx_expr_to_spark
 from convert.spec import (
     AggregateStep,
     CallFunctionStep,
+    DistinctStep,
     FilterStep,
     JoinStep,
     PipelineSpec,
     ReadStep,
     SelectStep,
+    SortStep,
     Step,
+    UnionStep,
     WithColumnsStep,
     WriteStep,
 )
@@ -88,6 +91,27 @@ def _render_join(step: JoinStep) -> str:
     return f"{_var(step.id)} = {_var(step.left)}.join({_var(step.right)}, on={on}, how={step.how!r})"
 
 
+def _render_union(step: UnionStep) -> str:
+    result = _var(step.inputs[0])
+    for other in step.inputs[1:]:
+        result = f"{result}.unionByName({_var(other)}, allowMissingColumns=True)"
+    return f"{_var(step.id)} = {result}"
+
+
+def _render_sort(step: SortStep) -> str:
+    orderings = ", ".join(
+        f'F.col("{c.column}").{"desc" if c.descending else "asc"}()' for c in step.columns
+    )
+    return f"{_var(step.id)} = {_var(step.input)}.orderBy({orderings})"
+
+
+def _render_distinct(step: DistinctStep) -> str:
+    if step.columns:
+        cols = ", ".join(f'"{c}"' for c in step.columns)
+        return f"{_var(step.id)} = {_var(step.input)}.dropDuplicates([{cols}])"
+    return f"{_var(step.id)} = {_var(step.input)}.dropDuplicates()"
+
+
 _AGG_FUNCS = {"sum", "count", "avg", "min", "max"}
 
 
@@ -129,6 +153,9 @@ _RENDERERS: dict[type, Callable[[Any], str]] = {
     FilterStep: _render_filter,
     WithColumnsStep: _render_with_columns,
     JoinStep: _render_join,
+    UnionStep: _render_union,
+    SortStep: _render_sort,
+    DistinctStep: _render_distinct,
     AggregateStep: _render_aggregate,
     CallFunctionStep: _render_call_function,
     WriteStep: _render_write,

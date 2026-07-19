@@ -74,6 +74,35 @@ class JoinStep(BaseModel):
     use_function: str | None = "safe_join"
 
 
+class UnionStep(BaseModel):
+    """Stack two or more inputs by column name (Alteryx Union tool)."""
+
+    op: Literal["union"] = "union"
+    id: str
+    inputs: list[str] = Field(min_length=2)
+
+
+class SortColumn(BaseModel):
+    column: str
+    descending: bool = False
+
+
+class SortStep(BaseModel):
+    op: Literal["sort"] = "sort"
+    id: str
+    input: str
+    columns: list[SortColumn] = Field(min_length=1)
+
+
+class DistinctStep(BaseModel):
+    """Keep the first occurrence per key (Alteryx Unique tool's U output)."""
+
+    op: Literal["distinct"] = "distinct"
+    id: str
+    input: str
+    columns: list[str] = Field(default_factory=list)  # empty = all columns
+
+
 class AggregateStep(BaseModel):
     op: Literal["aggregate"] = "aggregate"
     id: str
@@ -106,6 +135,9 @@ Step = Annotated[
     | FilterStep
     | WithColumnsStep
     | JoinStep
+    | UnionStep
+    | SortStep
+    | DistinctStep
     | AggregateStep
     | CallFunctionStep
     | WriteStep,
