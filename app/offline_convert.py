@@ -78,11 +78,26 @@ class _Converter:
         # them re-route to their own resolved input. Populated in topological
         # order, so downstream lookups always find their aliases.
         self._elided: dict[str, str] = {}
+        # Placeholder reads synthesized when a chain's source is an
+        # unsupported tool (e.g. a connector the parser can't convert):
+        # the pipeline stays runnable once an engineer lands that data in
+        # the todo_source_* table.
+        self.synthetic_reads: dict[str, ReadStep] = {}
 
     def _follow_aliases(self, tool_id: str) -> str:
         while tool_id in self._elided:
             tool_id = self._elided[tool_id]
         return tool_id
+
+    def _placeholder_read(self, for_tool_id: str) -> str:
+        """Synthesize a TODO source table for a chain whose real source is unsupported."""
+        step_id = f"src_{for_tool_id}"
+        if step_id not in self.synthetic_reads:
+            table = f"{self.target.catalog}.{self.target.schema_}.todo_source_{for_tool_id}"
+            self.synthetic_reads[step_id] = ReadStep(
+                id=step_id, source_table=table, alias=f"todo_source_{for_tool_id}"
+            )
+        return step_id
 
     def _input_id(self, node: Node) -> str:
         """Nearest emitted upstream step id, bridging unsupported and elided nodes."""
@@ -90,10 +105,12 @@ class _Converter:
             resolved = self.workflow.resolve_supported_upstream(upstream)
             if resolved is not None:
                 return self._follow_aliases(resolved)
-        return node.tool_id
+        return self._placeholder_read(node.tool_id)
 
     def _resolve(self, tool_id: str) -> str:
-        resolved = self.workflow.resolve_supported_upstream(tool_id) or tool_id
+        resolved = self.workflow.resolve_supported_upstream(tool_id)
+        if resolved is None:
+            return self._placeholder_read(tool_id)
         return self._follow_aliases(resolved)
 
     def step_for_node(self, node: Node) -> Step | None:
@@ -250,7 +267,7 @@ def naive_spec_from_workflow(workflow: Workflow, target: TargetRef) -> PipelineS
             functions_used.add(step.use_function)
         steps.append(step)
 
-    steps = _topological_steps(steps)
+    steps = _topological_steps(list(converter.synthetic_reads.values()) + steps)
     return PipelineSpec(
         name=workflow.name,
         language="pyspark",

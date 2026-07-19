@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import re
 
-_FIELD_REF = re.compile(r"\[([^\[\]]+)]")
+# Field names may themselves contain one level of brackets (cube-style names
+# like "ProjectCube_Data[Redbox Customer]"), so match the outer reference and
+# keep inner brackets as part of the quoted identifier.
+_FIELD_REF = re.compile(r"\[((?:[^\[\]]|\[[^\]]*\])+)\]")
 
 # Case-insensitive 1:1 function renames (call shape unchanged).
 _FUNC_RENAMES: dict[str, str] = {

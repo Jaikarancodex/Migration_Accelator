@@ -137,9 +137,123 @@ with st.sidebar:
 repo = _repo()
 object_names = repo.list_object_names()
 
-tab_repo, tab_convert, tab_code, tab_parity, tab_deploy = st.tabs(
-    ["Repo & dependency graph", "Convert", "Generated code", "Parity preview", "Deploy"]
+FORMAT_LABELS: dict[ArtifactFormat, str] = {
+    "job": "Job script (spark_python_task)",
+    "notebook": "Notebook (notebook_task)",
+    "sdp": "SDP / Declarative Pipeline (medallion)",
+}
+FORMAT_ORDER: list[ArtifactFormat] = ["job", "notebook", "sdp"]
+
+tab_quick, tab_repo, tab_convert, tab_code, tab_parity, tab_deploy = st.tabs(
+    [
+        ":rocket: Quick migrate",
+        "Repo & dependency graph",
+        "Convert",
+        "Generated code",
+        "Parity preview",
+        "Deploy",
+    ]
 )
+
+with tab_quick:
+    st.markdown(
+        "#### Migrate an Alteryx workflow to Databricks in one step\n"
+        "1. Upload your `.yxmd` file &nbsp;→&nbsp; 2. Click **Migrate & deploy** &nbsp;→&nbsp; "
+        "3. Open the job in your workspace.\n\n"
+        "The app parses the workflow, converts it, picks the best deployment format, "
+        "and deploys it. Use the other tabs only when you want to review or fine-tune."
+    )
+    quick_file = st.file_uploader("Alteryx workflow (.yxmd)", type=["yxmd"], key="quick_upload")
+    qc1, qc2 = st.columns(2)
+    quick_host = qc1.text_input(
+        "Databricks workspace URL",
+        value="https://dbc-922a9e09-b3e2.cloud.databricks.com",
+        key="quick_host",
+    )
+    quick_env_token = os.environ.get("DATABRICKS_TOKEN", "")
+    quick_token = quick_env_token or qc2.text_input(
+        "Access token", type="password", key="quick_token",
+        help="Databricks: Settings > Developer > Access tokens. Never stored.",
+    )
+    if quick_env_token:
+        qc2.caption("Token found in environment — no need to paste one.")
+
+    if st.button(":rocket: Migrate & deploy", type="primary", key="quick_go"):
+        if quick_file is None:
+            st.error("Upload a .yxmd file first.")
+        elif not quick_token:
+            st.error("An access token is required to deploy.")
+        else:
+            progress = st.status("Migrating...", expanded=True)
+            with progress:
+                st.write("**1/4** Parsing the Alteryx workflow...")
+                names = _ingest_files([quick_file])
+                if not names:
+                    progress.update(label="Parse failed", state="error")
+                    st.stop()
+                wf_name = names[0]
+                workflow = _repo().read_workflow(wf_name)
+                st.write(
+                    f"Parsed **{wf_name}**: {len(workflow.nodes)} tools converted, "
+                    f"{len(workflow.unsupported)} need manual attention."
+                )
+
+                st.write("**2/4** Converting to a Databricks pipeline spec...")
+                quick_target = TargetRef(catalog="workspace", schema="default", layer="bronze")
+                if has_key:
+                    quick_spec = generate_pipeline_spec(AnthropicLLMClient(), workflow, quick_target)
+                    rec = recommend_deployment_format(AnthropicLLMClient(), workflow)
+                else:
+                    quick_spec = naive_spec_from_workflow(workflow, quick_target)
+                    rec = heuristic_recommendation(workflow)
+                st.write(f"Format: **{FORMAT_LABELS[rec.format]}** — {rec.rationale}")
+
+                st.write("**3/4** Writing the asset bundle...")
+                quick_safe = re.sub(r"\W+", "_", wf_name).strip("_").lower()
+                quick_dir = _ROOT / "bundles" / quick_safe
+                export_bundle_from_spec(
+                    quick_spec, quick_dir, workspace_host=quick_host, artifact_format=rec.format
+                )
+
+                st.write(f"**4/4** Deploying to {quick_host} ...")
+                ok, log = deploy_bundle(quick_dir, quick_host, quick_token)
+
+            if ok:
+                progress.update(label="Migration deployed!", state="complete")
+                url_lines = [line.strip() for line in log.splitlines() if "URL:" in line]
+                for line in url_lines:
+                    st.success(f"Job created — {line}")
+                st.session_state["quick_last_bundle"] = str(quick_dir)
+                if workflow.unsupported:
+                    with st.expander(
+                        f":warning: {len(workflow.unsupported)} tool(s) need manual follow-up"
+                    ):
+                        for u in workflow.unsupported:
+                            m = lookup_by_plugin(u.plugin)
+                            if m is not None:
+                                st.caption(f"**{m.tool}** — {m.databricks_logic}")
+                            else:
+                                st.caption(
+                                    f"[{u.tool_id}] {u.plugin} — likely an embedded macro or "
+                                    "connector; a placeholder todo_source_* table was created "
+                                    "where needed. Land that data, then re-run."
+                                )
+                st.caption(
+                    "Before running the job, make sure its source tables exist in your "
+                    "workspace (the generated code's spark.read/spark.table names)."
+                )
+            else:
+                progress.update(label="Deploy failed", state="error")
+                st.code(log)
+
+    if st.session_state.get("quick_last_bundle") and st.button(
+        "Run the deployed job now", key="quick_run"
+    ):
+        with st.spinner("Running job (waits for completion)..."):
+            ok, log = run_bundle_job(
+                st.session_state["quick_last_bundle"], quick_host, quick_token
+            )
+        (st.success if ok else st.error)(log[-1000:])
 
 with tab_repo:
     st.subheader("Migration repo")
@@ -195,7 +309,11 @@ with tab_convert:
                         f"\n\n:bulb: Manual Databricks conversion: {mapping.databricks_logic}"
                     )
                 else:
-                    st.caption(f"[{u.tool_id}] {u.plugin} — {u.reason}")
+                    st.caption(
+                        f"[{u.tool_id}] {u.plugin} — {u.reason}. If this is an embedded "
+                        "macro, convert the macro's own workflow separately (or land its "
+                        "output in the generated todo_source_* placeholder table)."
+                    )
 
         with st.expander("Parsed workflow nodes (topological order)", expanded=False):
             for node in workflow.topological_order():
@@ -237,13 +355,6 @@ with tab_convert:
                 "Spec is ready — open the **Generated code** tab to pick Job / Notebook / SDP "
                 "(or ask the LLM to recommend one)."
             )
-
-FORMAT_LABELS: dict[ArtifactFormat, str] = {
-    "job": "Job script (spark_python_task)",
-    "notebook": "Notebook (notebook_task)",
-    "sdp": "SDP / Declarative Pipeline (dlt)",
-}
-FORMAT_ORDER: list[ArtifactFormat] = ["job", "notebook", "sdp"]
 
 with tab_code:
     if not object_names:

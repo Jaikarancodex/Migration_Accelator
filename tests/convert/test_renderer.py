@@ -207,16 +207,40 @@ def test_render_notebook_rejects_sql_spec() -> None:
         render_databricks_notebook(spec)
 
 
-def test_render_sdp_emits_dp_table_per_write() -> None:
+def test_render_sdp_emits_medallion_layers() -> None:
     source = render_sdp(_full_spec())
     compile(source, "<generated>", "exec")
     assert "from pyspark import pipelines as dp" in source
-    assert '@dp.table(name="sales_summary"' in source
-    # the pipeline runtime owns the write: the table function returns the write step's input df
-    assert "return df_audited" in source
+    # bronze: one raw landing table per read
+    assert '@dp.table(name="bronze_sales"' in source
+    assert '@dp.table(name="bronze_customers"' in source
+    # silver: the transform chain reads from bronze
+    assert '@dp.table(name="silver_sales_summary"' in source
+    assert 'spark.read.table("bronze_sales")' in source
+    # gold: aggregation happens here, not in silver
+    assert '@dp.table(name="gold_sales_summary"' in source
+    gold_body = source.split('gold_sales_summary"')[1]
+    assert "groupBy" in gold_body
+    silver_body = source.split('silver_sales_summary"')[1].split("@dp.table")[0]
+    assert "groupBy" not in silver_body
+    # the pipeline runtime owns the write
     assert ".write.mode(" not in source
-    # the legacy dlt module must not appear
     assert "dlt" not in source
+
+
+def test_render_sdp_without_aggregates_gold_is_passthrough() -> None:
+    spec = PipelineSpec(
+        name="plain", language="pyspark", source=SOURCE, target=TARGET,
+        steps=[
+            ReadStep(id="r", source_table="t", alias="raw"),
+            FilterStep(id="f", input="r", condition="[a] > 0"),
+            WriteStep(id="w", input="f", target_table="main.x.plain_out", mode="overwrite"),
+        ],
+    )
+    source = render_sdp(spec)
+    compile(source, "<generated>", "exec")
+    assert '@dp.table(name="gold_plain_out"' in source
+    assert 'return spark.read.table("silver_plain")' in source
 
 
 def test_render_sdp_requires_a_write_step() -> None:

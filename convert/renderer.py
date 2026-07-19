@@ -239,16 +239,29 @@ def _sdp_table_name(target_table: str) -> str:
     return re.sub(r"\W", "_", name)
 
 
+def _dp_table(name: str, comment: str, body_lines: list[str]) -> str:
+    indented = "\n".join("    " + line.replace("\n", "\n    ") for line in body_lines)
+    return (
+        f'\n@dp.table(name="{name}", comment="{comment}")\n'
+        f"def {name}():  # noqa: ANN201\n{indented}"
+    )
+
+
 def render_sdp(spec: PipelineSpec) -> str:
-    """Render a spec as a Lakeflow/Spark Declarative Pipeline module.
+    """Render a spec as a medallion-layered Lakeflow/Spark Declarative Pipeline.
 
     Uses the current `from pyspark import pipelines as dp` / `@dp.table` API
-    (the successor to the legacy `import dlt` module). Each write step becomes
-    one `@dp.table` function returning the dataframe that was going to be
-    written; the pipeline runtime owns the actual write, so WriteStep's mode
-    is not rendered here. The transform chain is replayed inside each table
-    function — slight duplication across multi-output specs is accepted so
-    every table function is self-contained.
+    (the successor to the legacy `import dlt` module), structured as:
+    - bronze_<alias>: one raw landing table per source read;
+    - silver_<name>: the cleaning/transform chain (selects, filters,
+      formulas, joins...) reading from the bronze tables;
+    - gold_<table>: one table per output, applying the aggregate steps (and
+      anything after them) on silver — a pass-through materialization when
+      the workflow has no aggregation.
+
+    The pipeline runtime owns the writes, so WriteStep's mode is not
+    rendered. Multi-output specs whose outputs branch mid-chain share the
+    silver table; review the gold layer for those.
     """
     if spec.language != "pyspark":
         raise ValueError(f"render_sdp called with a {spec.language!r} spec")
@@ -256,21 +269,59 @@ def render_sdp(spec: PipelineSpec) -> str:
     writes = [s for s in spec.steps if isinstance(s, WriteStep)]
     if not writes:
         raise ValueError(f"Spec {spec.name!r} has no write steps; SDP needs at least one table")
-    non_write_steps = [s for s in spec.steps if not isinstance(s, WriteStep)]
+
+    reads = [s for s in spec.steps if isinstance(s, ReadStep)]
+    middle = [s for s in spec.steps if not isinstance(s, ReadStep | WriteStep)]
+    first_agg_index = next(
+        (i for i, s in enumerate(middle) if isinstance(s, AggregateStep)), len(middle)
+    )
+    silver_steps = middle[:first_agg_index]
+    gold_steps = middle[first_agg_index:]
 
     parts = [_HEADER.format(name=spec.name), "from pyspark import pipelines as dp"]
     imports = _function_imports(spec)
     if imports:
         parts.append("\n".join(imports))
 
-    for write in writes:
-        table_name = _sdp_table_name(write.target_table)
-        body_lines = [_render_step(step) for step in non_write_steps]
-        body_lines.append(f"return {_var(write.input)}")
-        indented = "\n".join("    " + line.replace("\n", "\n    ") for line in body_lines)
+    # Bronze: raw landing, one table per source.
+    bronze_names: dict[str, str] = {}
+    for read in reads:
+        bronze = f"bronze_{_sdp_table_name(read.alias)}"
+        bronze_names[read.id] = bronze
         parts.append(
-            f'\n@dp.table(name="{table_name}", comment="Generated from spec {spec.name!r}")\n'
-            f"def {table_name}():  # noqa: ANN201\n{indented}"
+            _dp_table(bronze, f"Raw landing of {read.source_table}",
+                      [f'return spark.read.table("{read.source_table}")'])
         )
+
+    # Silver: cleaned/conformed transforms over bronze.
+    silver = f"silver_{_sdp_table_name(spec.name)}"
+    silver_body = [
+        f'{_var(read.id)} = spark.read.table("{bronze_names[read.id]}")' for read in reads
+    ]
+    silver_body.extend(_render_step(step) for step in silver_steps)
+    silver_last = silver_steps[-1].id if silver_steps else (reads[-1].id if reads else "")
+    silver_body.append(f"return {_var(silver_last)}")
+    parts.append(_dp_table(silver, f"Transformed data for {spec.name}", silver_body))
+
+    # Gold: business-level aggregates per output table.
+    gold_ids = {s.id for s in gold_steps}
+    for write in writes:
+        gold = f"gold_{_sdp_table_name(write.target_table)}"
+        body: list[str] = []
+        referenced: set[str] = set()
+        for step in gold_steps:
+            for attr in ("input", "left", "right"):
+                value = getattr(step, attr, None)
+                if value is not None and value not in gold_ids:
+                    referenced.add(value)
+        if gold_steps:
+            for upstream_id in sorted(referenced):
+                body.append(f'{_var(upstream_id)} = spark.read.table("{silver}")')
+            body.extend(_render_step(step) for step in gold_steps)
+            final = write.input if write.input in gold_ids else gold_steps[-1].id
+            body.append(f"return {_var(final)}")
+        else:
+            body.append(f'return spark.read.table("{silver}")')
+        parts.append(_dp_table(gold, f"Business-level output {write.target_table}", body))
 
     return "\n".join(parts) + "\n"
