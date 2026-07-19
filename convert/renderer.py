@@ -202,13 +202,15 @@ def _sdp_table_name(target_table: str) -> str:
 
 
 def render_sdp(spec: PipelineSpec) -> str:
-    """Render a spec as a Lakeflow/Spark Declarative Pipeline (dlt) module.
+    """Render a spec as a Lakeflow/Spark Declarative Pipeline module.
 
-    Each write step becomes one `@dlt.table` function returning the dataframe
-    that was going to be written; dlt owns the actual write, so WriteStep's
-    mode is not rendered here. The transform chain is replayed inside each
-    table function — slight duplication across multi-output specs is accepted
-    so every table function is self-contained.
+    Uses the current `from pyspark import pipelines as dp` / `@dp.table` API
+    (the successor to the legacy `import dlt` module). Each write step becomes
+    one `@dp.table` function returning the dataframe that was going to be
+    written; the pipeline runtime owns the actual write, so WriteStep's mode
+    is not rendered here. The transform chain is replayed inside each table
+    function — slight duplication across multi-output specs is accepted so
+    every table function is self-contained.
     """
     if spec.language != "pyspark":
         raise ValueError(f"render_sdp called with a {spec.language!r} spec")
@@ -218,7 +220,7 @@ def render_sdp(spec: PipelineSpec) -> str:
         raise ValueError(f"Spec {spec.name!r} has no write steps; SDP needs at least one table")
     non_write_steps = [s for s in spec.steps if not isinstance(s, WriteStep)]
 
-    parts = [_HEADER.format(name=spec.name), "import dlt  # noqa: F401"]
+    parts = [_HEADER.format(name=spec.name), "from pyspark import pipelines as dp"]
     imports = _function_imports(spec)
     if imports:
         parts.append("\n".join(imports))
@@ -229,7 +231,7 @@ def render_sdp(spec: PipelineSpec) -> str:
         body_lines.append(f"return {_var(write.input)}")
         indented = "\n".join("    " + line.replace("\n", "\n    ") for line in body_lines)
         parts.append(
-            f'\n@dlt.table(name="{table_name}", comment="Generated from spec {spec.name!r}")\n'
+            f'\n@dp.table(name="{table_name}", comment="Generated from spec {spec.name!r}")\n'
             f"def {table_name}():  # noqa: ANN201\n{indented}"
         )
 

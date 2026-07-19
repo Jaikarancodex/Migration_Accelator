@@ -170,14 +170,16 @@ def test_render_notebook_rejects_sql_spec() -> None:
         render_databricks_notebook(spec)
 
 
-def test_render_sdp_emits_dlt_table_per_write() -> None:
+def test_render_sdp_emits_dp_table_per_write() -> None:
     source = render_sdp(_full_spec())
     compile(source, "<generated>", "exec")
-    assert "import dlt" in source
-    assert '@dlt.table(name="sales_summary"' in source
-    # dlt owns the write: the table function returns the write step's input df
+    assert "from pyspark import pipelines as dp" in source
+    assert '@dp.table(name="sales_summary"' in source
+    # the pipeline runtime owns the write: the table function returns the write step's input df
     assert "return df_audited" in source
     assert ".write.mode(" not in source
+    # the legacy dlt module must not appear
+    assert "dlt" not in source
 
 
 def test_render_sdp_requires_a_write_step() -> None:
