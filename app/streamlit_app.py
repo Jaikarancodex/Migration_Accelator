@@ -54,18 +54,22 @@ TARGET_DEFAULTS = load_yaml_config(_ROOT / "configs" / "target.yaml", TargetDefa
 DEPLOY_DEFAULTS = load_yaml_config(_ROOT / "configs" / "deploy.yaml", DeployDefaultsConfig)
 
 
+# Fixed project-local store (gitignored) so ingested workflows survive
+# server restarts and page refreshes, unlike a per-session temp dir.
+_REPO_DIR = _ROOT / "migration_repo_output"
+
+
 def _repo() -> MigrationRepo:
-    if "repo_dir" not in st.session_state:
-        st.session_state.repo_dir = tempfile.mkdtemp(prefix="migration_accelerator_")
-    return MigrationRepo(st.session_state.repo_dir)
+    return MigrationRepo(_REPO_DIR)
 
 
 def _spec_to_yaml(spec: PipelineSpec) -> str:
     return yaml.safe_dump(spec.model_dump(by_alias=True, mode="json"), sort_keys=False)
 
 
-def _ingest_files(uploaded_files: list[Any]) -> None:
+def _ingest_files(uploaded_files: list[Any]) -> list[str]:
     repo = _repo()
+    ingested: list[str] = []
     for uploaded in uploaded_files:
         with tempfile.NamedTemporaryFile(suffix=".yxmd", delete=False) as tmp:
             tmp.write(uploaded.getvalue())
@@ -75,8 +79,13 @@ def _ingest_files(uploaded_files: list[Any]) -> None:
         except Exception as exc:  # noqa: BLE001 - surfaced to the user, not swallowed
             st.error(f"Failed to parse {uploaded.name}: {exc}")
             continue
+        # Name the object after the uploaded file, not the temp copy it was
+        # parsed from — otherwise every upload shows up as "tmpXXXX".
+        original_name = Path(uploaded.name).stem
+        workflow = workflow.model_copy(update={"name": original_name, "source_file": uploaded.name})
         repo.write_workflow(workflow)
-    st.session_state.pop("workflow_cache", None)
+        ingested.append(original_name)
+    return ingested
 
 
 st.title("Migration Accelerator — Review Console")
@@ -90,14 +99,18 @@ with st.sidebar:
     uploaded_files = st.file_uploader("Upload .yxmd file(s)", type=["yxmd"], accept_multiple_files=True)
 
     if st.button("Parse & store", type="primary"):
-        files_to_ingest = list(uploaded_files or [])
+        ingested_names: list[str] = []
         if use_sample:
             repo = _repo()
             workflow = parse_yxmd(SAMPLE_FIXTURE)
             repo.write_workflow(workflow)
-        if files_to_ingest:
-            _ingest_files(files_to_ingest)
-        st.success("Ingested.")
+            ingested_names.append(workflow.name)
+        if uploaded_files:
+            ingested_names.extend(_ingest_files(list(uploaded_files)))
+        if ingested_names:
+            st.success(f"Ingested: {', '.join(ingested_names)}")
+        else:
+            st.warning("Nothing to ingest — upload a .yxmd or tick the sample checkbox.")
 
     st.divider()
     st.header("2. Target defaults")
@@ -190,6 +203,10 @@ with tab_convert:
                         st.toast("No API key — using offline rule-based conversion instead.")
                     spec = naive_spec_from_workflow(workflow, target)
                 st.session_state[spec_key] = _spec_to_yaml(spec)
+                # A freshly generated spec is already validated — store it so
+                # the Generated code tab (format picker + render) works
+                # immediately; re-validation is only needed after manual edits.
+                st.session_state[f"validated_spec::{selected}"] = spec
             except SpecGenerationError as exc:
                 st.error(str(exc))
 
@@ -198,7 +215,7 @@ with tab_convert:
             edited = st.text_area("spec_yaml", value=st.session_state[spec_key], height=400, label_visibility="collapsed")
             st.session_state[spec_key] = edited
 
-            if st.button("Validate", key=f"validate::{selected}"):
+            if st.button("Validate edits", key=f"validate::{selected}"):
                 try:
                     data = yaml.safe_load(edited)
                     validated_spec = PipelineSpec.model_validate(data)
@@ -206,6 +223,10 @@ with tab_convert:
                     st.success("Spec is valid.")
                 except (yaml.YAMLError, ValidationError) as exc:
                     st.error(f"Validation failed: {exc}")
+            st.caption(
+                "Spec is ready — open the **Generated code** tab to pick Job / Notebook / SDP "
+                "(or ask the LLM to recommend one)."
+            )
 
 FORMAT_LABELS: dict[ArtifactFormat, str] = {
     "job": "Job script (spark_python_task)",
@@ -223,7 +244,10 @@ with tab_code:
             "PipelineSpec | None", st.session_state.get(f"validated_spec::{selected}")
         )
         if stored_spec is None:
-            st.info("Generate and validate a spec for this object in the Convert tab first.")
+            st.info(
+                "No spec yet for this object — go to the **Convert** tab and click "
+                "**Generate spec** first. The Job / Notebook / SDP options appear here after that."
+            )
         else:
             rec_key = f"format_rec::{selected}"
             if st.button("Recommend format (LLM)", key=f"recommend::{selected}"):
