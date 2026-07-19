@@ -5,9 +5,17 @@ key: it does a direct 1:1 mapping of IR nodes to spec steps (the same
 mapping an LLM is asked to produce), skipping the LLM call and YAML
 round-trip entirely. It is demo/offline tooling for the app, not part of
 the core conversion path in `llm/convert.py`.
+
+Real-workflow behaviors:
+- unsupported tools in the middle of a chain are bridged over (a step whose
+  upstream was skipped connects to the nearest supported ancestor instead);
+- file paths / database refs that aren't Unity Catalog identifiers are
+  retargeted into the target catalog.schema with a sanitized table name.
 """
 
 from __future__ import annotations
+
+import re
 
 from convert.spec import (
     AggregateStep,
@@ -19,6 +27,7 @@ from convert.spec import (
     JoinStep,
     PipelineSpec,
     ReadStep,
+    RecordIdStep,
     SelectStep,
     SortColumn,
     SortStep,
@@ -33,112 +42,215 @@ from ingest.alteryx.ir import Node, ToolType, Workflow
 
 _AGG_FUNC_MAP = {"sum": "sum", "count": "count", "avg": "avg", "min": "min", "max": "max"}
 
-
-def _input_id(node: Node, fallback: str) -> str:
-    return node.upstream_ids[0] if node.upstream_ids else fallback
+_UC_IDENTIFIER = re.compile(r"[A-Za-z0-9_]+(\.[A-Za-z0-9_]+){1,2}")
 
 
-def _table_ref(target: TargetRef, table_name: str) -> str:
-    return f"{target.catalog}.{target.schema_}.{table_name}"
+def _sanitize_table_name(raw: str) -> str:
+    """Derive a Unity Catalog table name from a file path or database reference.
+
+    Handles UNC/posix file paths (basename minus extension), Alteryx
+    connection strings ('aka:...|||[DB].[dbo].[Table]' -> last bracket
+    segment), and arbitrary text (non-word chars collapse to underscores).
+    """
+    name = raw.split("|||")[-1]
+    brackets = re.findall(r"\[([^\]]+)\]", name)
+    if brackets:
+        name = brackets[-1]
+    else:
+        name = re.split(r"[\\/]", name)[-1]
+        name = re.sub(r"\.[A-Za-z0-9]+$", "", name)
+    name = re.sub(r"\W+", "_", name).strip("_").lower()
+    return name or "unnamed"
 
 
-def _step_for_node(node: Node, target: TargetRef) -> Step | None:
-    if node.tool_type == ToolType.INPUT:
-        table = node.table_name or node.tool_id
-        return ReadStep(id=node.tool_id, source_table=table, alias=table.rsplit(".", 1)[-1])
+def _source_table(raw: str, target: TargetRef) -> str:
+    """Keep UC-style identifiers as-is; retarget file/DB refs into the target schema."""
+    if _UC_IDENTIFIER.fullmatch(raw):
+        return raw
+    return f"{target.catalog}.{target.schema_}.{_sanitize_table_name(raw)}"
 
-    if node.tool_type == ToolType.SELECT:
-        columns = [
-            ColumnSelection(column=f.field, rename=f.rename, drop=not f.selected) for f in node.fields
-        ]
-        return SelectStep(id=node.tool_id, input=_input_id(node, node.tool_id), columns=columns)
 
-    if node.tool_type == ToolType.FILTER:
-        return FilterStep(
-            id=node.tool_id,
-            input=_input_id(node, node.tool_id),
-            condition=node.filter_expression or "true",
-        )
+class _Converter:
+    def __init__(self, workflow: Workflow, target: TargetRef) -> None:
+        self.workflow = workflow
+        self.target = target
+        # Nodes converted to a pass-through (no step emitted): references to
+        # them re-route to their own resolved input. Populated in topological
+        # order, so downstream lookups always find their aliases.
+        self._elided: dict[str, str] = {}
 
-    if node.tool_type == ToolType.FORMULA:
-        computed_columns = [ComputedColumn(name=f.field, expression=f.expression) for f in node.formulas]
-        return WithColumnsStep(
-            id=node.tool_id, input=_input_id(node, node.tool_id), columns=computed_columns
-        )
+    def _follow_aliases(self, tool_id: str) -> str:
+        while tool_id in self._elided:
+            tool_id = self._elided[tool_id]
+        return tool_id
 
-    if node.tool_type == ToolType.JOIN:
-        left_id = node.upstream_ids[0] if len(node.upstream_ids) > 0 else node.tool_id
-        right_id = node.upstream_ids[1] if len(node.upstream_ids) > 1 else left_id
-        left_keys = next((j.keys for j in node.join_inputs if j.side == "left"), [])
-        right_keys = next((j.keys for j in node.join_inputs if j.side == "right"), [])
-        return JoinStep(
-            id=node.tool_id,
-            left=left_id,
-            right=right_id,
-            left_keys=left_keys,
-            right_keys=right_keys,
-            how="inner",
-            use_function="safe_join",
-        )
+    def _input_id(self, node: Node) -> str:
+        """Nearest emitted upstream step id, bridging unsupported and elided nodes."""
+        for upstream in node.upstream_ids:
+            resolved = self.workflow.resolve_supported_upstream(upstream)
+            if resolved is not None:
+                return self._follow_aliases(resolved)
+        return node.tool_id
 
-    if node.tool_type == ToolType.UNION:
-        inputs = node.upstream_ids if len(node.upstream_ids) >= 2 else [_input_id(node, node.tool_id)] * 2
-        return UnionStep(id=node.tool_id, inputs=inputs)
+    def _resolve(self, tool_id: str) -> str:
+        resolved = self.workflow.resolve_supported_upstream(tool_id) or tool_id
+        return self._follow_aliases(resolved)
 
-    if node.tool_type == ToolType.SORT:
-        sort_columns = [SortColumn(column=f.field, descending=f.descending) for f in node.sort_fields]
-        if not sort_columns:
-            return None
-        return SortStep(id=node.tool_id, input=_input_id(node, node.tool_id), columns=sort_columns)
+    def step_for_node(self, node: Node) -> Step | None:
+        target = self.target
+        if node.tool_type == ToolType.INPUT:
+            raw = node.table_name or node.tool_id
+            table = _source_table(raw, target)
+            return ReadStep(id=node.tool_id, source_table=table, alias=table.rsplit(".", 1)[-1])
 
-    if node.tool_type == ToolType.UNIQUE:
-        return DistinctStep(
-            id=node.tool_id, input=_input_id(node, node.tool_id), columns=node.unique_fields
-        )
+        if node.tool_type == ToolType.SELECT:
+            listed = [f for f in node.fields if f.field != "*Unknown"]
+            unknown_kept = any(f.field == "*Unknown" and f.selected for f in node.fields)
+            if unknown_kept and not any(f.rename or not f.selected for f in listed):
+                # "Keep all other columns" with no renames/drops on the listed
+                # ones is a pass-through (its only effect would be type casts,
+                # which ColumnSelection doesn't carry) — elide it.
+                self._elided[node.tool_id] = self._input_id(node)
+                return None
+            columns = [
+                ColumnSelection(column=f.field, rename=f.rename, drop=not f.selected)
+                for f in listed
+            ]
+            return SelectStep(id=node.tool_id, input=self._input_id(node), columns=columns)
 
-    if node.tool_type == ToolType.SUMMARIZE:
-        group_by = [a.field for a in node.summarize_actions if a.action.lower() == "groupby"]
-        aggregations = [
-            Aggregation(
-                column=a.field,
-                func=_AGG_FUNC_MAP.get(a.action.lower(), "sum"),
-                alias=a.rename or f"{a.action.lower()}_{a.field}",
+        if node.tool_type == ToolType.FILTER:
+            return FilterStep(
+                id=node.tool_id,
+                input=self._input_id(node),
+                condition=node.filter_expression or "true",
             )
-            for a in node.summarize_actions
-            if a.action.lower() != "groupby"
-        ]
-        return AggregateStep(
-            id=node.tool_id,
-            input=_input_id(node, node.tool_id),
-            group_by=group_by,
-            aggregations=aggregations,
-        )
 
-    if node.tool_type == ToolType.OUTPUT:
-        table = (node.output_path or node.tool_id).rsplit(".", 1)[-1]
-        return WriteStep(
-            id=node.tool_id,
-            input=_input_id(node, node.tool_id),
-            target_table=_table_ref(target, table),
-            mode="overwrite",
-        )
+        if node.tool_type == ToolType.FORMULA:
+            computed = [ComputedColumn(name=f.field, expression=f.expression) for f in node.formulas]
+            return WithColumnsStep(id=node.tool_id, input=self._input_id(node), columns=computed)
 
-    return None
+        if node.tool_type == ToolType.JOIN:
+            left_id = self._resolve(node.upstream_ids[0]) if node.upstream_ids else node.tool_id
+            right_id = (
+                self._resolve(node.upstream_ids[1]) if len(node.upstream_ids) > 1 else left_id
+            )
+            left_keys = next((j.keys for j in node.join_inputs if j.side == "left"), [])
+            right_keys = next((j.keys for j in node.join_inputs if j.side == "right"), [])
+            return JoinStep(
+                id=node.tool_id,
+                left=left_id,
+                right=right_id,
+                left_keys=left_keys,
+                right_keys=right_keys,
+                how="inner",
+                use_function="safe_join",
+            )
+
+        if node.tool_type == ToolType.UNION:
+            resolved = [self._resolve(u) for u in node.upstream_ids]
+            inputs = resolved if len(resolved) >= 2 else [self._input_id(node)] * 2
+            return UnionStep(id=node.tool_id, inputs=inputs)
+
+        if node.tool_type == ToolType.SORT:
+            sort_columns = [
+                SortColumn(column=f.field, descending=f.descending) for f in node.sort_fields
+            ]
+            if not sort_columns:
+                return None
+            return SortStep(id=node.tool_id, input=self._input_id(node), columns=sort_columns)
+
+        if node.tool_type == ToolType.UNIQUE:
+            return DistinctStep(
+                id=node.tool_id, input=self._input_id(node), columns=node.unique_fields
+            )
+
+        if node.tool_type == ToolType.RECORD_ID:
+            return RecordIdStep(
+                id=node.tool_id,
+                input=self._input_id(node),
+                column=node.record_id_field or "RecordID",
+            )
+
+        if node.tool_type == ToolType.SUMMARIZE:
+            group_by = [a.field for a in node.summarize_actions if a.action.lower() == "groupby"]
+            aggregations = [
+                Aggregation(
+                    column=a.field,
+                    func=_AGG_FUNC_MAP.get(a.action.lower(), "sum"),
+                    alias=a.rename or f"{a.action.lower()}_{a.field}",
+                )
+                for a in node.summarize_actions
+                if a.action.lower() != "groupby"
+            ]
+            return AggregateStep(
+                id=node.tool_id, input=self._input_id(node), group_by=group_by, aggregations=aggregations
+            )
+
+        if node.tool_type == ToolType.OUTPUT:
+            table = _sanitize_table_name(node.output_path or node.tool_id)
+            return WriteStep(
+                id=node.tool_id,
+                input=self._input_id(node),
+                target_table=f"{target.catalog}.{target.schema_}.{table}",
+                mode="overwrite",
+            )
+
+        return None
+
+
+def _step_inputs(step: Step) -> list[str]:
+    if isinstance(step, JoinStep):
+        return [step.left, step.right]
+    if isinstance(step, UnionStep):
+        return list(step.inputs)
+    input_id = getattr(step, "input", None)
+    return [input_id] if input_id is not None else []
+
+
+def _topological_steps(steps: list[Step]) -> list[Step]:
+    """Order steps so every referenced input precedes its consumer.
+
+    The workflow's own topological order can break when unsupported tools sit
+    inside the chain (their edges are invisible to the IR traversal), so the
+    emitted steps are re-sorted by their actual references.
+    """
+    by_id = {s.id: s for s in steps}
+    ordered: list[Step] = []
+    visiting: set[str] = set()
+    done: set[str] = set()
+
+    def visit(step: Step) -> None:
+        if step.id in done or step.id in visiting:
+            return
+        visiting.add(step.id)
+        for input_id in _step_inputs(step):
+            upstream = by_id.get(input_id)
+            if upstream is not None:
+                visit(upstream)
+        visiting.discard(step.id)
+        done.add(step.id)
+        ordered.append(step)
+
+    for step in steps:
+        visit(step)
+    return ordered
 
 
 def naive_spec_from_workflow(workflow: Workflow, target: TargetRef) -> PipelineSpec:
     """Directly map a Workflow's nodes onto PipelineSpec steps, no LLM involved."""
+    converter = _Converter(workflow, target)
     steps: list[Step] = []
     functions_used: set[str] = set()
 
     for node in workflow.topological_order():
-        step = _step_for_node(node, target)
+        step = converter.step_for_node(node)
         if step is None:
             continue
         if isinstance(step, JoinStep) and step.use_function:
             functions_used.add(step.use_function)
         steps.append(step)
 
+    steps = _topological_steps(steps)
     return PipelineSpec(
         name=workflow.name,
         language="pyspark",

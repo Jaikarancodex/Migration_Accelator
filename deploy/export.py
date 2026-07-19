@@ -23,12 +23,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
+import re
+import subprocess
 from pathlib import Path
 from typing import cast
 
 from app.offline_convert import naive_spec_from_workflow
 from convert.renderer import render_databricks_notebook, render_pyspark, render_sdp
-from convert.spec import TargetRef
+from convert.spec import PipelineSpec, TargetRef
 from deploy.dab import ArtifactFormat, single_target_bundle, write_databricks_yml
 from ingest.alteryx.parser import parse_yxmd
 
@@ -39,19 +42,21 @@ _RENDERERS = {
 }
 
 
-def export_bundle(
-    workflow_path: str | Path,
+def export_bundle_from_spec(
+    spec: PipelineSpec,
     output_dir: str | Path,
     workspace_host: str,
     artifact_format: ArtifactFormat = "notebook",
-    catalog: str = "workspace",
-    schema: str = "default",
-    bundle_name: str = "migration-accelerator",
+    bundle_name: str | None = None,
 ) -> Path:
-    """Parse, convert, render, and write a deployable bundle directory."""
-    workflow = parse_yxmd(workflow_path)
-    target = TargetRef(catalog=catalog, schema=schema, layer="bronze")
-    spec = naive_spec_from_workflow(workflow, target)
+    """Render a validated spec and write a deployable bundle directory.
+
+    The bundle name defaults to the pipeline name — bundle names are the
+    deployment-state key, so two workflows sharing one name would replace
+    each other's resources on deploy.
+    """
+    if bundle_name is None:
+        bundle_name = re.sub(r"\W+", "_", spec.name).strip("_").lower()
     code = _RENDERERS[artifact_format](spec)
 
     out = Path(output_dir)
@@ -64,12 +69,90 @@ def export_bundle(
         pipeline_name=spec.name,
         python_file=f"./src/{spec.name}.py",
         workspace_host=workspace_host,
-        catalog=catalog,
-        schema=schema,
+        catalog=spec.target.catalog,
+        schema=spec.target.schema_,
         artifact_format=artifact_format,
     )
     write_databricks_yml(bundle, out / "databricks.yml")
     return out
+
+
+def export_bundle(
+    workflow_path: str | Path,
+    output_dir: str | Path,
+    workspace_host: str,
+    artifact_format: ArtifactFormat = "notebook",
+    catalog: str = "workspace",
+    schema: str = "default",
+    bundle_name: str | None = None,
+) -> Path:
+    """Parse, convert, render, and write a deployable bundle directory."""
+    workflow = parse_yxmd(workflow_path)
+    target = TargetRef(catalog=catalog, schema=schema, layer="bronze")
+    spec = naive_spec_from_workflow(workflow, target)
+    return export_bundle_from_spec(
+        spec, output_dir, workspace_host, artifact_format=artifact_format, bundle_name=bundle_name
+    )
+
+
+def _cli_env(host: str, token: str | None) -> dict[str, str]:
+    env = dict(os.environ)
+    env["DATABRICKS_HOST"] = host
+    if token:
+        env["DATABRICKS_TOKEN"] = token
+    return env
+
+
+def deploy_bundle(bundle_dir: str | Path, host: str, token: str | None = None) -> tuple[bool, str]:
+    """Run `databricks bundle deploy` for an exported bundle.
+
+    Auth comes from `token` (or the caller's environment when None). Returns
+    (succeeded, combined CLI output incl. the deployed resource summary).
+    """
+    env = _cli_env(host, token)
+    deploy = subprocess.run(
+        ["databricks", "bundle", "deploy"],
+        cwd=str(bundle_dir), env=env, capture_output=True, text=True, timeout=600,
+    )
+    output = (deploy.stdout + deploy.stderr).strip()
+    if deploy.returncode != 0:
+        return False, output
+
+    summary = subprocess.run(
+        ["databricks", "bundle", "summary"],
+        cwd=str(bundle_dir), env=env, capture_output=True, text=True, timeout=120,
+    )
+    return True, f"{output}\n\n{(summary.stdout + summary.stderr).strip()}"
+
+
+def run_bundle_job(
+    bundle_dir: str | Path,
+    host: str,
+    token: str | None = None,
+    resource_key: str | None = None,
+) -> tuple[bool, str]:
+    """Run the bundle's job/pipeline and wait for it to finish.
+
+    `resource_key` is the resource name inside databricks.yml (e.g.
+    "<pipeline>_job"); when omitted it is read from the bundle file, since
+    the CLI requires an explicit key when it cannot infer one.
+    """
+    if resource_key is None:
+        import yaml
+
+        doc = yaml.safe_load((Path(bundle_dir) / "databricks.yml").read_text(encoding="utf-8"))
+        resources = doc.get("resources", {})
+        keys = [k for kind in ("jobs", "pipelines") for k in resources.get(kind, {})]
+        if not keys:
+            return False, "No job or pipeline resource found in databricks.yml"
+        resource_key = keys[0]
+
+    result = subprocess.run(
+        ["databricks", "bundle", "run", resource_key],
+        cwd=str(bundle_dir), env=_cli_env(host, token),
+        capture_output=True, text=True, timeout=1800,
+    )
+    return result.returncode == 0, (result.stdout + result.stderr).strip()
 
 
 def main() -> None:
@@ -80,7 +163,7 @@ def main() -> None:
     parser.add_argument("--format", default="notebook", choices=sorted(_RENDERERS))
     parser.add_argument("--catalog", default="workspace")
     parser.add_argument("--schema", default="default")
-    parser.add_argument("--bundle-name", default="migration-accelerator")
+    parser.add_argument("--bundle-name", default=None, help="Defaults to the workflow name")
     args = parser.parse_args()
 
     out = export_bundle(

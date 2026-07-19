@@ -38,4 +38,4 @@ df_7 = df_6.groupBy("CustomerID", "Region").agg(F.sum("LineTotal").alias("TotalS
 
 # COMMAND ----------
 
-df_7.write.mode('overwrite').saveAsTable("workspace.default.sales_summary")
+df_7.write.mode('overwrite').saveAsTable("workspace.default.legacy_sales_sales_summary")

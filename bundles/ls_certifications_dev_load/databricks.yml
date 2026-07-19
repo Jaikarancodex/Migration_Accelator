@@ -1,5 +1,5 @@
 bundle:
-  name: sales_summary
+  name: ls_certifications_dev_load
 variables:
   catalog:
     description: Target catalog
@@ -9,12 +9,12 @@ variables:
     default: default
 resources:
   jobs:
-    sales_summary_job:
-      name: sales_summary_job
+    LS_Certifications_DEV_Load_job:
+      name: LS_Certifications_DEV_Load_job
       tasks:
-      - task_key: sales_summary
+      - task_key: LS_Certifications_DEV_Load
         notebook_task:
-          notebook_path: ./src/sales_summary.py
+          notebook_path: ./src/LS_Certifications_DEV_Load.py
 targets:
   default:
     mode: development

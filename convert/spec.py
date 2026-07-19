@@ -103,6 +103,15 @@ class DistinctStep(BaseModel):
     columns: list[str] = Field(default_factory=list)  # empty = all columns
 
 
+class RecordIdStep(BaseModel):
+    """Add a sequential identifier column (Alteryx Record ID tool)."""
+
+    op: Literal["record_id"] = "record_id"
+    id: str
+    input: str
+    column: str = "RecordID"
+
+
 class AggregateStep(BaseModel):
     op: Literal["aggregate"] = "aggregate"
     id: str
@@ -138,6 +147,7 @@ Step = Annotated[
     | UnionStep
     | SortStep
     | DistinctStep
+    | RecordIdStep
     | AggregateStep
     | CallFunctionStep
     | WriteStep,

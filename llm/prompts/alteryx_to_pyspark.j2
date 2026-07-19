@@ -17,6 +17,7 @@ the YAML in prose or markdown fences.
   - union {id, inputs: [step ids]}  (stacks streams by column name)
   - sort {id, input, columns: [{column, descending?}]}
   - distinct {id, input, columns: [key columns; empty = all]}
+  - record_id {id, input, column}  (adds a sequential id column)
   - aggregate {id, input, group_by, aggregations: [{column, func, alias}]}
   - call_function {id, input, function, args: {}}
   - write {id, input, target_table, mode}

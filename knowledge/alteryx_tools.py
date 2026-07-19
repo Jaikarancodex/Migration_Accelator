@@ -130,6 +130,7 @@ CATALOG: list[ToolMapping] = [
         what_it_does="Adds a sequential unique identifier column.",
         databricks_logic='df.withColumn("RecordID", F.row_number().over(Window.orderBy(...))) for '
         "true sequences; F.monotonically_increasing_id() when uniqueness (not density) is enough.",
+        parser_supported=True,
     ),
     ToolMapping(
         tool="Data Cleansing",
@@ -278,6 +279,7 @@ def mappings_for_tool_types(tool_types: set[ToolType]) -> list[ToolMapping]:
         "Union.Union": "union",
         "Sort.Sort": "sort",
         "Unique.Unique": "unique",
+        "RecordID.RecordID": "record_id",
         "Summarize.Summarize": "summarize",
     }
     return [m for m in CATALOG if type_by_suffix.get(m.plugin_suffix) in wanted]

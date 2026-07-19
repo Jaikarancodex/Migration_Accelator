@@ -22,6 +22,7 @@ class ToolType(StrEnum):
     UNION = "union"
     SORT = "sort"
     UNIQUE = "unique"
+    RECORD_ID = "record_id"
     SUMMARIZE = "summarize"
     OUTPUT = "output"
     UNSUPPORTED = "unsupported"
@@ -83,6 +84,7 @@ class Node(BaseModel):
     join_inputs: list[JoinInput] = Field(default_factory=list)  # JOIN
     sort_fields: list[SortField] = Field(default_factory=list)  # SORT
     unique_fields: list[str] = Field(default_factory=list)  # UNIQUE
+    record_id_field: str | None = None  # RECORD_ID
     summarize_actions: list[SummarizeAction] = Field(default_factory=list)  # SUMMARIZE
     output_path: str | None = None  # OUTPUT
 
@@ -94,11 +96,15 @@ class UnsupportedTool(BaseModel):
     """A tool the parser encountered but does not know how to convert.
 
     Logged rather than raising, so the rest of the workflow still parses.
+    `upstream_ids` is kept so converters can bridge over the gap — a
+    downstream node whose input is unsupported falls back to this node's
+    own upstream, with the skipped tool becoming a documented TODO.
     """
 
     tool_id: str
     plugin: str
     reason: str
+    upstream_ids: list[str] = Field(default_factory=list)
 
 
 class Workflow(BaseModel):
@@ -111,6 +117,27 @@ class Workflow(BaseModel):
 
     def node_by_id(self, tool_id: str) -> Node | None:
         return next((n for n in self.nodes if n.tool_id == tool_id), None)
+
+    def resolve_supported_upstream(self, tool_id: str) -> str | None:
+        """Follow `tool_id` upstream through unsupported tools to the nearest supported node.
+
+        Returns `tool_id` itself when it is a supported node; otherwise walks
+        the unsupported chain upward so converters can bridge over skipped
+        tools instead of referencing steps that don't exist.
+        """
+        supported = {n.tool_id for n in self.nodes}
+        unsupported_by_id = {u.tool_id: u for u in self.unsupported}
+        seen: set[str] = set()
+        current = tool_id
+        while current not in supported:
+            if current in seen:
+                return None
+            seen.add(current)
+            skipped = unsupported_by_id.get(current)
+            if skipped is None or not skipped.upstream_ids:
+                return None
+            current = skipped.upstream_ids[0]
+        return current
 
     def topological_order(self) -> list[Node]:
         """Return nodes ordered so every node's upstream nodes precede it."""

@@ -20,6 +20,7 @@ from convert.spec import (
     JoinStep,
     PipelineSpec,
     ReadStep,
+    RecordIdStep,
     SelectStep,
     SortStep,
     Step,
@@ -105,6 +106,13 @@ def _render_sort(step: SortStep) -> str:
     return f"{_var(step.id)} = {_var(step.input)}.orderBy({orderings})"
 
 
+def _render_record_id(step: RecordIdStep) -> str:
+    return (
+        f'{_var(step.id)} = {_var(step.input)}.withColumn("{step.column}", '
+        f"F.row_number().over(Window.orderBy(F.monotonically_increasing_id())))"
+    )
+
+
 def _render_distinct(step: DistinctStep) -> str:
     if step.columns:
         cols = ", ".join(f'"{c}"' for c in step.columns)
@@ -156,6 +164,7 @@ _RENDERERS: dict[type, Callable[[Any], str]] = {
     UnionStep: _render_union,
     SortStep: _render_sort,
     DistinctStep: _render_distinct,
+    RecordIdStep: _render_record_id,
     AggregateStep: _render_aggregate,
     CallFunctionStep: _render_call_function,
     WriteStep: _render_write,
@@ -171,6 +180,8 @@ def _render_step(step: Step) -> str:
 
 def _function_imports(spec: PipelineSpec) -> list[str]:
     imports = []
+    if any(isinstance(step, RecordIdStep) for step in spec.steps):
+        imports.append("from pyspark.sql.window import Window")
     for name in spec.functions_used:
         fn = get_function(name)
         if fn is None:

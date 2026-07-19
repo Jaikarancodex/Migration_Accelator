@@ -12,6 +12,7 @@ parses.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Iterator
 from pathlib import Path
 from xml.etree.ElementTree import Element  # noqa: S405 - parsing done via defusedxml below
 
@@ -33,6 +34,15 @@ from ingest.alteryx.ir import (
 logger = structlog.get_logger(__name__)
 
 # Maps the suffix of the Alteryx GuiSettings Plugin attribute to our ToolType.
+# GUI-only elements: comments, previews, and container boxes. They carry no
+# data semantics, so they are skipped silently instead of flagged unsupported.
+_IGNORED_PLUGIN_SUFFIXES: tuple[str, ...] = (
+    "TextBox.TextBox",
+    "ToolContainer.ToolContainer",
+    "Browse.Browse",
+    "BrowseV2.BrowseV2",
+)
+
 _PLUGIN_TOOL_TYPES: dict[str, ToolType] = {
     "DbFileInput.DbFileInput": ToolType.INPUT,
     "TextInput.TextInput": ToolType.INPUT,
@@ -43,6 +53,7 @@ _PLUGIN_TOOL_TYPES: dict[str, ToolType] = {
     "Union.Union": ToolType.UNION,
     "Sort.Sort": ToolType.SORT,
     "Unique.Unique": ToolType.UNIQUE,
+    "RecordID.RecordID": ToolType.RECORD_ID,
     "Summarize.Summarize": ToolType.SUMMARIZE,
     "DbFileOutput.DbFileOutput": ToolType.OUTPUT,
 }
@@ -180,7 +191,8 @@ def _parse_node(elem: Element, connections: dict[str, list[str]]) -> Node | Unsu
         return UnsupportedTool(
             tool_id=tool_id,
             plugin=plugin,
-            reason="Unrecognized plugin type" if config is None else "No <Configuration> found",
+            reason="No <Configuration> found" if config is None else "Unrecognized plugin type",
+            upstream_ids=connections.get(tool_id, []),
         )
 
     node = Node(
@@ -206,12 +218,30 @@ def _parse_node(elem: Element, connections: dict[str, list[str]]) -> Node | Unsu
         node.sort_fields = _parse_sort(config)
     elif tool_type == ToolType.UNIQUE:
         node.unique_fields = _parse_unique(config)
+    elif tool_type == ToolType.RECORD_ID:
+        node.record_id_field = _text(config.find("FieldName")) or "RecordID"
     elif tool_type == ToolType.SUMMARIZE:
         node.summarize_actions = _parse_summarize(config)
     elif tool_type == ToolType.OUTPUT:
         node.output_path = _text(config.find("File"))
 
     return node
+
+
+def _iter_node_elements(parent: Element) -> Iterator[Element]:
+    """Yield tool Node elements, descending into ToolContainer ChildNodes.
+
+    Real workflows organize tools inside (possibly nested) container boxes;
+    the container node itself is GUI-only, but its children are real tools.
+    """
+    for node_elem in parent.findall("Node"):
+        plugin = _plugin_name(node_elem.find("GuiSettings"))
+        if plugin.endswith("ToolContainer.ToolContainer"):
+            child_nodes = node_elem.find("ChildNodes")
+            if child_nodes is not None:
+                yield from _iter_node_elements(child_nodes)
+            continue
+        yield node_elem
 
 
 def _parse_connections(root: Element) -> dict[str, list[str]]:
@@ -254,7 +284,11 @@ def parse_yxmd(path: str | Path) -> Workflow:
         logger.warning("no_nodes_element", file=str(path))
         nodes_elem = root
 
-    for node_elem in nodes_elem.findall("Node"):
+    for node_elem in _iter_node_elements(nodes_elem):
+        plugin = _plugin_name(node_elem.find("GuiSettings"))
+        if any(plugin.endswith(suffix) for suffix in _IGNORED_PLUGIN_SUFFIXES):
+            logger.debug("ignored_gui_tool", file=str(path), plugin=plugin)
+            continue
         parsed = _parse_node(node_elem, connections)
         if isinstance(parsed, UnsupportedTool):
             logger.warning(

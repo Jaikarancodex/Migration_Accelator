@@ -14,6 +14,7 @@ Run with: streamlit run app/streamlit_app.py
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -33,6 +34,7 @@ from configs.models import DeployDefaultsConfig, TargetDefaultsConfig
 from convert.renderer import render_databricks_notebook, render_pyspark, render_sdp
 from convert.spec import MedallionLayer, PipelineSpec, TargetRef
 from deploy.dab import ArtifactFormat, build_databricks_yml, default_bundle, single_target_bundle
+from deploy.export import deploy_bundle, export_bundle_from_spec, run_bundle_job
 from eval.schema import ColumnSchema, ColumnType, TableSchema
 from eval.synthetic import generate_synthetic_rows
 from ingest.alteryx.parser import parse_yxmd
@@ -329,7 +331,10 @@ with tab_deploy:
         st.info("Ingest an object first.")
     else:
         selected = st.selectbox("Object", object_names, key="deploy_object")
-        bundle_name = st.text_input("Bundle name", value=DEPLOY_DEFAULTS.bundle_name)
+        # Bundle name is the deployment-state key: default to one per workflow
+        # so deploys of different workflows never replace each other.
+        default_bundle_name = re.sub(r"\W+", "_", selected).strip("_").lower()
+        bundle_name = st.text_input("Bundle name", value=default_bundle_name)
 
         artifact_format = cast(
             ArtifactFormat, st.session_state.get(f"artifact_format::{selected}", "job")
@@ -381,4 +386,63 @@ with tab_deploy:
             yml_text = build_databricks_yml(bundle)
             st.code(yml_text, language="yaml")
             st.download_button("Download databricks.yml", data=yml_text, file_name="databricks.yml", mime="text/yaml")
-            st.caption("This only generates the YAML — `databricks bundle deploy` is never invoked (see non-goals).")
+
+        st.divider()
+        st.subheader("One-click migrate & deploy")
+        deploy_spec = cast(
+            "PipelineSpec | None", st.session_state.get(f"validated_spec::{selected}")
+        )
+        if deploy_spec is None:
+            st.info("Generate a spec in the Convert tab first — then this deploys it in one click.")
+        else:
+            deploy_host = free_host if deploy_style.startswith("Databricks Free") else dev_host
+            env_token = os.environ.get("DATABRICKS_TOKEN", "")
+            token = env_token or st.text_input(
+                "Databricks access token",
+                type="password",
+                help="Generate one under Settings > Developer > Access tokens. "
+                "Used only for this deploy; never stored.",
+            )
+            if env_token:
+                st.caption("Using the DATABRICKS_TOKEN from the environment.")
+
+            if st.button(":rocket: Migrate & deploy to Databricks", type="primary"):
+                if not token:
+                    st.error("A Databricks access token is required.")
+                else:
+                    safe_name = re.sub(r"\W+", "_", selected).strip("_").lower()
+                    bundle_dir = _ROOT / "bundles" / safe_name
+                    with st.spinner("Rendering artifact and writing bundle..."):
+                        export_bundle_from_spec(
+                            deploy_spec,
+                            bundle_dir,
+                            workspace_host=deploy_host,
+                            artifact_format=artifact_format,
+                            bundle_name=bundle_name,
+                        )
+                    with st.spinner(f"Deploying to {deploy_host} ..."):
+                        ok, log = deploy_bundle(bundle_dir, deploy_host, token)
+                    st.code(log)
+                    if ok:
+                        st.success(
+                            f"Deployed. Bundle written to `bundles/{safe_name}/` — commit it to git "
+                            "to keep the workflow versioned."
+                        )
+                    else:
+                        st.error("Deploy failed — see the CLI output above.")
+
+            if st.button("Run the deployed job now"):
+                if not token:
+                    st.error("A Databricks access token is required.")
+                else:
+                    safe_name = re.sub(r"\W+", "_", selected).strip("_").lower()
+                    bundle_dir = _ROOT / "bundles" / safe_name
+                    if not (bundle_dir / "databricks.yml").exists():
+                        st.error("Deploy first — no bundle found for this object.")
+                    else:
+                        with st.spinner("Running job (waits for completion)..."):
+                            ok, log = run_bundle_job(bundle_dir, deploy_host, token)
+                        st.code(log)
+                        (st.success if ok else st.error)(
+                            "Job succeeded." if ok else "Job failed — see output above."
+                        )

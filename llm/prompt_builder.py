@@ -43,6 +43,8 @@ def _describe_node(node: Node) -> str:
         return f"{base} unique_keys={node.unique_fields}"
     if node.tool_type == ToolType.UNION:
         return f"{base} stacks all upstream inputs by column name"
+    if node.tool_type == ToolType.RECORD_ID:
+        return f"{base} adds sequential id column {node.record_id_field!r}"
     if node.tool_type == ToolType.SELECT:
         fields = ", ".join(
             f"{f.field}{'->' + f.rename if f.rename else ''}{' [DROP]' if not f.selected else ''}"
