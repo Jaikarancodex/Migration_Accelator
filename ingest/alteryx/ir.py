@@ -24,6 +24,9 @@ class ToolType(StrEnum):
     UNIQUE = "unique"
     RECORD_ID = "record_id"
     CLEANSE = "cleanse"
+    MACRO = "macro"  # references a .yxmc macro workflow by name
+    MACRO_INPUT = "macro_input"  # placeholder input inside a .yxmc
+    MACRO_OUTPUT = "macro_output"  # placeholder output inside a .yxmc
     SUMMARIZE = "summarize"
     OUTPUT = "output"
     UNSUPPORTED = "unsupported"
@@ -99,6 +102,7 @@ class Node(BaseModel):
     unique_fields: list[str] = Field(default_factory=list)  # UNIQUE
     record_id_field: str | None = None  # RECORD_ID
     cleanse: CleanseConfig | None = None  # CLEANSE
+    macro_name: str | None = None  # MACRO: the referenced .yxmc name (stem, lowercase)
     summarize_actions: list[SummarizeAction] = Field(default_factory=list)  # SUMMARIZE
     output_path: str | None = None  # OUTPUT
 

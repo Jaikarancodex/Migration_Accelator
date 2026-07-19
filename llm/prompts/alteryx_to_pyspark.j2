@@ -20,6 +20,7 @@ the YAML in prose or markdown fences.
   - record_id {id, input, column}  (adds a sequential id column)
   - cleanse {id, input, columns?, trim?, collapse_whitespace?, remove_all_whitespace?,
     nulls_to_blank?, numeric_nulls_to_zero?, case?}  (Data Cleansing macro -> generated utility)
+  - macro_call {id, input, macro}  (invokes a registered .yxmc converted to a utility)
   - aggregate {id, input, group_by, aggregations: [{column, func, alias}]}
   - call_function {id, input, function, args: {}}
   - write {id, input, target_table, mode}

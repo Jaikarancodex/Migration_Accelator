@@ -73,7 +73,35 @@ class MigrationRepo:
     def list_object_names(self) -> list[str]:
         if not self.root.exists():
             return []
-        return sorted(p.name for p in self.root.iterdir() if p.is_dir())
+        return sorted(p.name for p in self.root.iterdir() if p.is_dir() and p.name != "macros")
+
+    # -- Macro registry (.yxmc workflows, keyed by lowercase stem) ----------
+
+    def _macro_dir(self) -> Path:
+        return self.root / "macros"
+
+    def write_macro(self, workflow: Workflow) -> str:
+        """Register a parsed .yxmc macro; returns the registry key."""
+        key = workflow.name.lower()
+        self._macro_dir().mkdir(parents=True, exist_ok=True)
+        (self._macro_dir() / f"{key}.json").write_text(
+            workflow.model_dump_json(indent=2), encoding="utf-8"
+        )
+        return key
+
+    def read_macro(self, key: str) -> Workflow:
+        path = self._macro_dir() / f"{key.lower()}.json"
+        if not path.exists():
+            raise ObjectNotFoundError(key)
+        return Workflow.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def list_macro_names(self) -> list[str]:
+        if not self._macro_dir().exists():
+            return []
+        return sorted(p.stem for p in self._macro_dir().glob("*.json"))
+
+    def all_macros(self) -> dict[str, Workflow]:
+        return {name: self.read_macro(name) for name in self.list_macro_names()}
 
     def list_metadata(self) -> list[ObjectMetadata]:
         return [self.read_metadata(name) for name in self.list_object_names()]

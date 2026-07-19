@@ -57,6 +57,8 @@ _PLUGIN_TOOL_TYPES: dict[str, ToolType] = {
     "Unique.Unique": ToolType.UNIQUE,
     "RecordID.RecordID": ToolType.RECORD_ID,
     "DataCleansePro.DataCleansePro": ToolType.CLEANSE,
+    "MacroInput.MacroInput": ToolType.MACRO_INPUT,
+    "MacroOutput.MacroOutput": ToolType.MACRO_OUTPUT,
     "Summarize.Summarize": ToolType.SUMMARIZE,
     "DbFileOutput.DbFileOutput": ToolType.OUTPUT,
 }
@@ -252,13 +254,11 @@ def _parse_node(elem: Element, connections: dict[str, list[str]]) -> Node | Unsu
             tool_type = ToolType.CLEANSE
             plugin = f"Macro:{macro}"
         else:
-            return UnsupportedTool(
-                tool_id=tool_id,
-                plugin=f"Macro:{macro}",
-                reason=f"Alteryx macro {macro!r} is not supported yet — convert its .yxmc "
-                "workflow separately or land its output in the placeholder table",
-                upstream_ids=connections.get(tool_id, []),
-            )
+            # A custom macro: kept as a typed node so the converter can
+            # inline it when its .yxmc has been uploaded to the macro
+            # registry; without a registered macro it is bridged over.
+            tool_type = ToolType.MACRO
+            plugin = f"Macro:{macro}"
 
     if tool_type == ToolType.UNSUPPORTED or config is None:
         return UnsupportedTool(
@@ -297,6 +297,9 @@ def _parse_node(elem: Element, connections: dict[str, list[str]]) -> Node | Unsu
         node.cleanse = (
             _parse_cleanse_macro(config) if plugin.startswith("Macro:") else _parse_cleanse_pro(config)
         )
+    elif tool_type == ToolType.MACRO:
+        raw = plugin.removeprefix("Macro:")
+        node.macro_name = Path(raw.replace("\\", "/")).stem.lower()
     elif tool_type == ToolType.SUMMARIZE:
         node.summarize_actions = _parse_summarize(config)
     elif tool_type == ToolType.OUTPUT:
@@ -363,7 +366,11 @@ def parse_yxmd(path: str | Path) -> Workflow:
 
     for node_elem in _iter_node_elements(nodes_elem):
         plugin = _plugin_name(node_elem.find("GuiSettings"))
-        if any(plugin.endswith(suffix) for suffix in _IGNORED_PLUGIN_SUFFIXES):
+        # AlteryxGuiToolkit.* covers interface widgets (checkboxes, list
+        # boxes, text boxes...) that parametrize macros but carry no data flow.
+        if plugin.startswith("AlteryxGuiToolkit.") or any(
+            plugin.endswith(suffix) for suffix in _IGNORED_PLUGIN_SUFFIXES
+        ):
             logger.debug("ignored_gui_tool", file=str(path), plugin=plugin)
             continue
         parsed = _parse_node(node_elem, connections)

@@ -26,6 +26,8 @@ from convert.spec import (
     DistinctStep,
     FilterStep,
     JoinStep,
+    MacroCallStep,
+    MacroUtility,
     PipelineSpec,
     ReadStep,
     RecordIdStep,
@@ -72,9 +74,16 @@ def _source_table(raw: str, target: TargetRef) -> str:
 
 
 class _Converter:
-    def __init__(self, workflow: Workflow, target: TargetRef) -> None:
+    def __init__(
+        self,
+        workflow: Workflow,
+        target: TargetRef,
+        macros: dict[str, Workflow] | None = None,
+    ) -> None:
         self.workflow = workflow
         self.target = target
+        self.macros = macros or {}
+        self.macro_utilities: dict[str, MacroUtility] = {}
         # Nodes converted to a pass-through (no step emitted): references to
         # them re-route to their own resolved input. Populated in topological
         # order, so downstream lookups always find their aliases.
@@ -89,6 +98,33 @@ class _Converter:
         while tool_id in self._elided:
             tool_id = self._elided[tool_id]
         return tool_id
+
+    def _macro_utility(self, key: str) -> MacroUtility | None:
+        """Convert a registered .yxmc into a generated utility (cached per spec)."""
+        key = key.lower()
+        if key in self.macro_utilities:
+            return self.macro_utilities[key]
+        macro_wf = self.macros.get(key)
+        if macro_wf is None:
+            return None
+
+        sub = _Converter(macro_wf, self.target, self.macros)
+        steps: list[Step] = []
+        for inner in macro_wf.topological_order():
+            step = sub.step_for_node(inner)
+            if step is None or isinstance(step, WriteStep):
+                continue
+            steps.append(step)
+        outputs = [n for n in macro_wf.nodes if n.tool_type == ToolType.MACRO_OUTPUT]
+        if not outputs or not steps:
+            return None
+        returns = sub._elided.get(outputs[0].tool_id, steps[-1].id)
+        ordered = _topological_steps(list(sub.synthetic_reads.values()) + steps)
+        utility = MacroUtility(
+            name="macro_" + re.sub(r"\W+", "_", key).strip("_"), returns=returns, steps=ordered
+        )
+        self.macro_utilities[key] = utility
+        return utility
 
     def _placeholder_read(self, for_tool_id: str) -> str:
         """Synthesize a TODO source table for a chain whose real source is unsupported."""
@@ -189,6 +225,23 @@ class _Converter:
                 column=node.record_id_field or "RecordID",
             )
 
+        if node.tool_type == ToolType.MACRO:
+            utility = self._macro_utility(node.macro_name) if node.macro_name else None
+            if utility is None:
+                # Macro not uploaded (or not convertible): bridge over it so
+                # the chain stays intact; it surfaces in the review warnings.
+                self._elided[node.tool_id] = self._input_id(node)
+                return None
+            return MacroCallStep(id=node.tool_id, input=self._input_id(node), macro=utility.name)
+
+        if node.tool_type == ToolType.MACRO_INPUT:
+            self._elided[node.tool_id] = "macro_input"
+            return None
+
+        if node.tool_type == ToolType.MACRO_OUTPUT:
+            self._elided[node.tool_id] = self._input_id(node)
+            return None
+
         if node.tool_type == ToolType.CLEANSE:
             if node.cleanse is None:
                 self._elided[node.tool_id] = self._input_id(node)
@@ -270,9 +323,13 @@ def _topological_steps(steps: list[Step]) -> list[Step]:
     return ordered
 
 
-def naive_spec_from_workflow(workflow: Workflow, target: TargetRef) -> PipelineSpec:
+def naive_spec_from_workflow(
+    workflow: Workflow,
+    target: TargetRef,
+    macros: dict[str, Workflow] | None = None,
+) -> PipelineSpec:
     """Directly map a Workflow's nodes onto PipelineSpec steps, no LLM involved."""
-    converter = _Converter(workflow, target)
+    converter = _Converter(workflow, target, macros)
     steps: list[Step] = []
     functions_used: set[str] = set()
 
@@ -291,5 +348,6 @@ def naive_spec_from_workflow(workflow: Workflow, target: TargetRef) -> PipelineS
         source=SourceRef(system="alteryx", object_name=workflow.name),
         target=target,
         steps=steps,
+        macros=list(converter.macro_utilities.values()),
         functions_used=sorted(functions_used),
     )

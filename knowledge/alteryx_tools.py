@@ -246,6 +246,24 @@ CATALOG: list[ToolMapping] = [
         "downstream steps can Append Fields / join it.",
     ),
     ToolMapping(
+        tool="Macro Input",
+        plugin_suffix="MacroInput.MacroInput",
+        category="Interface",
+        what_it_does="Placeholder input inside a .yxmc macro definition.",
+        databricks_logic="Becomes the dataframe parameter of the generated utility function "
+        "when the macro is registered and inlined.",
+        parser_supported=True,
+    ),
+    ToolMapping(
+        tool="Macro Output",
+        plugin_suffix="MacroOutput.MacroOutput",
+        category="Interface",
+        what_it_does="Placeholder output inside a .yxmc macro definition.",
+        databricks_logic="Becomes the return value of the generated utility function when "
+        "the macro is registered and inlined.",
+        parser_supported=True,
+    ),
+    ToolMapping(
         tool="Text Input",
         plugin_suffix="TextInput.TextInput",
         category="In/Out",

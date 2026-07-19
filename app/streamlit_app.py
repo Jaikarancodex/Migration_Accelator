@@ -34,9 +34,14 @@ from configs.models import DeployDefaultsConfig, TargetDefaultsConfig
 from convert.renderer import render_databricks_notebook, render_pyspark, render_sdp
 from convert.spec import MedallionLayer, PipelineSpec, TargetRef
 from deploy.dab import ArtifactFormat, build_databricks_yml, default_bundle, single_target_bundle
+from deploy.dbsql import (
+    SqlError,
+    csv_to_table_statements,
+    first_warehouse_id,
+    parity_check,
+    run_sql,
+)
 from deploy.export import deploy_bundle, export_bundle_from_spec, run_bundle_job
-from eval.schema import ColumnSchema, ColumnType, TableSchema
-from eval.synthetic import generate_synthetic_rows
 from ingest.alteryx.parser import parse_yxmd
 from knowledge.alteryx_tools import lookup_by_plugin
 from llm.client import AnthropicLLMClient
@@ -116,6 +121,36 @@ with st.sidebar:
             st.warning("Nothing to ingest — upload a .yxmd or tick the sample checkbox.")
 
     st.divider()
+    st.header("Macros (.yxmc)")
+    st.caption(
+        "Upload the macro files your workflows reference. Registered macros are "
+        "converted into generated utility functions and called from the main pipeline."
+    )
+    macro_files = st.file_uploader(
+        "Upload .yxmc macro(s)", type=["yxmc"], accept_multiple_files=True, key="macro_upload"
+    )
+    if st.button("Register macros") and macro_files:
+        registered = []
+        for mf in macro_files:
+            with tempfile.NamedTemporaryFile(suffix=".yxmc", delete=False) as tmp:
+                tmp.write(mf.getvalue())
+                tmp_path = tmp.name
+            try:
+                macro_wf = parse_yxmd(tmp_path)
+            except Exception as exc:  # noqa: BLE001 - surfaced to the user
+                st.error(f"Failed to parse {mf.name}: {exc}")
+                continue
+            macro_wf = macro_wf.model_copy(
+                update={"name": Path(mf.name).stem, "source_file": mf.name}
+            )
+            registered.append(_repo().write_macro(macro_wf))
+        if registered:
+            st.success(f"Registered macros: {', '.join(registered)}")
+    known_macros = _repo().list_macro_names()
+    if known_macros:
+        st.caption("Registered: " + ", ".join(known_macros))
+
+    st.divider()
     st.header("2. Target defaults")
     catalog = st.text_input("Catalog", value=TARGET_DEFAULTS.catalog)
     schema_name = st.text_input("Schema", value=TARGET_DEFAULTS.schema_name)
@@ -150,7 +185,7 @@ tab_quick, tab_repo, tab_convert, tab_code, tab_parity, tab_deploy = st.tabs(
         "Repo & dependency graph",
         "Convert",
         "Generated code",
-        "Parity preview",
+        "Verify parity",
         "Deploy",
     ]
 )
@@ -204,7 +239,9 @@ with tab_quick:
                     quick_spec = generate_pipeline_spec(AnthropicLLMClient(), workflow, quick_target)
                     rec = recommend_deployment_format(AnthropicLLMClient(), workflow)
                 else:
-                    quick_spec = naive_spec_from_workflow(workflow, quick_target)
+                    quick_spec = naive_spec_from_workflow(
+                        workflow, quick_target, macros=_repo().all_macros()
+                    )
                     rec = heuristic_recommendation(workflow)
                 st.write(f"Format: **{FORMAT_LABELS[rec.format]}** — {rec.rationale}")
 
@@ -329,7 +366,7 @@ with tab_convert:
                 else:
                     if backend.startswith("Anthropic"):
                         st.toast("No API key — using offline rule-based conversion instead.")
-                    spec = naive_spec_from_workflow(workflow, target)
+                    spec = naive_spec_from_workflow(workflow, target, macros=_repo().all_macros())
                 st.session_state[spec_key] = _spec_to_yaml(spec)
                 # A freshly generated spec is already validated — store it so
                 # the Generated code tab (format picker + render) works
@@ -414,27 +451,100 @@ with tab_code:
                 st.error(str(exc))
 
 with tab_parity:
-    st.subheader("Synthetic data preview")
-    st.caption(
-        "eval/parity.py compares source-vs-target row sets once both are produced by a real run. "
-        "This environment has no Spark/Databricks runtime to execute the rendered pipeline against, "
-        "so this tab only previews the synthetic input the harness would use — see README 'Known limitations'."
+    st.subheader("Verify parity against the Alteryx run")
+    st.markdown(
+        "Prove the migration is correct: run the original Alteryx workflow once against a "
+        "frozen source extract, export its output as CSV, and compare it row-for-row with "
+        "the migrated pipeline's output table (`EXCEPT ALL` in both directions)."
     )
-    num_cols = st.number_input("Number of columns", min_value=1, max_value=10, value=3)
-    schema_columns: list[ColumnSchema] = []
-    type_options: list[ColumnType] = ["int", "float", "string", "bool", "date", "timestamp"]
-    for i in range(int(num_cols)):
-        c1, c2, c3 = st.columns(3)
-        name = c1.text_input(f"Column {i + 1} name", value=f"col_{i + 1}", key=f"col_name_{i}")
-        dtype = c2.selectbox(f"Column {i + 1} type", type_options, key=f"col_type_{i}")
-        is_key = c3.checkbox("key", key=f"col_key_{i}")
-        schema_columns.append(ColumnSchema(name=name, data_type=dtype, key=is_key))
+    pc1, pc2 = st.columns(2)
+    parity_host = pc1.text_input(
+        "Databricks workspace URL",
+        value="https://dbc-922a9e09-b3e2.cloud.databricks.com",
+        key="parity_host",
+    )
+    parity_env_token = os.environ.get("DATABRICKS_TOKEN", "")
+    parity_token = parity_env_token or pc2.text_input(
+        "Access token", type="password", key="parity_token"
+    )
+    if parity_env_token:
+        pc2.caption("Token found in environment.")
 
-    num_rows = st.slider("Rows to generate", min_value=5, max_value=200, value=20)
-    if st.button("Generate synthetic rows"):
-        schema = TableSchema(name="preview", columns=schema_columns)
-        rows = generate_synthetic_rows(schema, num_rows)
-        st.dataframe(rows, use_container_width=True)
+    migrated_table = st.text_input(
+        "Migrated output table", value="workspace.default.certifications_new"
+    )
+    expected_csv = st.file_uploader(
+        "Alteryx output export (.csv)", type=["csv"], key="parity_csv",
+        help="Export the original workflow's output from Alteryx as CSV and upload it here.",
+    )
+    expected_table = st.text_input(
+        "...or an existing expected table",
+        value="",
+        help="Leave blank when uploading a CSV; the CSV is loaded into expected_<name>.",
+    )
+    ignore_raw = st.text_input(
+        "Columns to exclude from the diff (comma-separated)",
+        value="Load_Date",
+        help="Non-deterministic columns: load timestamps, run ids, sequence columns "
+        "whose order Alteryx and Spark assign differently.",
+    )
+
+    if st.button("Run parity check", type="primary"):
+        if not parity_token:
+            st.error("An access token is required.")
+        else:
+            try:
+                with st.spinner("Finding SQL warehouse..."):
+                    warehouse = first_warehouse_id(parity_host, parity_token)
+
+                target_expected = expected_table.strip()
+                if expected_csv is not None:
+                    stem = re.sub(r"\W+", "_", Path(expected_csv.name).stem).strip("_").lower()
+                    target_expected = f"workspace.default.expected_{stem}"
+                    with st.spinner(f"Loading expected data into {target_expected}..."):
+                        for stmt in csv_to_table_statements(expected_csv.getvalue(), target_expected):
+                            run_sql(parity_host, parity_token, warehouse, stmt)
+                if not target_expected:
+                    st.error("Upload the Alteryx output CSV or name an expected table.")
+                    st.stop()
+
+                with st.spinner("Comparing tables (counts + EXCEPT ALL both directions)..."):
+                    report = parity_check(
+                        parity_host, parity_token, warehouse,
+                        migrated_table.strip(), target_expected,
+                        ignore_raw.split(","),
+                    )
+            except SqlError as exc:
+                st.error(str(exc))
+                st.stop()
+
+            m, e = report["migrated_count"], report["expected_count"]
+            if report["passed"]:
+                st.success(
+                    f"PARITY PASSED — {m} rows in both tables, no row-level differences "
+                    f"across {len(report['compared_columns'])} compared columns."
+                )
+            else:
+                st.error(f"PARITY FAILED — migrated: {m} rows, expected: {e} rows.")
+                if report["extra_in_migrated"]["rows"]:
+                    st.write("Rows in the migrated table but not in the Alteryx output (sample):")
+                    st.dataframe(
+                        [dict(zip(report["extra_in_migrated"]["columns"], r, strict=False))
+                         for r in report["extra_in_migrated"]["rows"]],
+                        use_container_width=True,
+                    )
+                if report["missing_from_migrated"]["rows"]:
+                    st.write("Rows in the Alteryx output but missing from the migrated table (sample):")
+                    st.dataframe(
+                        [dict(zip(report["missing_from_migrated"]["columns"], r, strict=False))
+                         for r in report["missing_from_migrated"]["rows"]],
+                        use_container_width=True,
+                    )
+            st.caption(
+                "Compared columns: " + ", ".join(report["compared_columns"]) +
+                (" | Ignored: " + ", ".join(report["ignored_columns"])
+                 if report["ignored_columns"] else "")
+            )
 
 with tab_deploy:
     st.subheader("Databricks Asset Bundle")

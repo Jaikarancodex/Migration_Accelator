@@ -112,6 +112,15 @@ class RecordIdStep(BaseModel):
     column: str = "RecordID"
 
 
+class MacroCallStep(BaseModel):
+    """Invoke a converted .yxmc macro, emitted as a generated utility function."""
+
+    op: Literal["macro_call"] = "macro_call"
+    id: str
+    input: str
+    macro: str  # name of a MacroUtility in PipelineSpec.macros
+
+
 class CleanseStep(BaseModel):
     """Data Cleansing macro converted to a generated cleanse_columns utility call."""
 
@@ -164,6 +173,7 @@ Step = Annotated[
     | DistinctStep
     | RecordIdStep
     | CleanseStep
+    | MacroCallStep
     | AggregateStep
     | CallFunctionStep
     | WriteStep,
@@ -184,6 +194,19 @@ class TargetRef(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class MacroUtility(BaseModel):
+    """A converted .yxmc macro: rendered as one generated function per artifact.
+
+    `steps` reference the special input id "macro_input" (the function's
+    dataframe parameter); `returns` is the id of the step whose result the
+    function returns.
+    """
+
+    name: str  # sanitized python identifier, e.g. macro_normalize_names
+    returns: str
+    steps: list[Step]
+
+
 class PipelineSpec(BaseModel):
     """The full spec for one converted pipeline object."""
 
@@ -192,6 +215,7 @@ class PipelineSpec(BaseModel):
     source: SourceRef
     target: TargetRef
     steps: list[Step]
+    macros: list[MacroUtility] = Field(default_factory=list)
     functions_used: list[str] = Field(default_factory=list)
 
     def step_by_id(self, step_id: str) -> Step | None:

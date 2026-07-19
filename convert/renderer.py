@@ -19,6 +19,7 @@ from convert.spec import (
     DistinctStep,
     FilterStep,
     JoinStep,
+    MacroCallStep,
     PipelineSpec,
     ReadStep,
     RecordIdStep,
@@ -150,8 +151,34 @@ def cleanse_columns(df, columns=None, trim=False, collapse_whitespace=False,
 '''
 
 
+def _all_steps(spec: PipelineSpec) -> list[Step]:
+    steps: list[Step] = list(spec.steps)
+    for macro in spec.macros:
+        steps.extend(macro.steps)
+    return steps
+
+
 def _uses_cleanse(spec: PipelineSpec) -> bool:
-    return any(isinstance(step, CleanseStep) for step in spec.steps)
+    return any(isinstance(step, CleanseStep) for step in _all_steps(spec))
+
+
+def _render_macro_call(step: MacroCallStep) -> str:
+    return f"{_var(step.id)} = {step.macro}({_var(step.input)})"
+
+
+def _render_macro_utilities(spec: PipelineSpec) -> list[str]:
+    """One generated function per converted .yxmc macro, shared by all formats."""
+    parts = []
+    for macro in spec.macros:
+        body_lines = [_render_step(step) for step in macro.steps]
+        body_lines.append(f"return {_var(macro.returns)}")
+        indented = "\n".join("    " + line.replace("\n", "\n    ") for line in body_lines)
+        parts.append(
+            f"\ndef {macro.name}(df_macro_input):  # noqa: ANN001, ANN201\n"
+            f'    """Utility generated from the Alteryx macro {macro.name!r}."""\n'
+            f"{indented}"
+        )
+    return parts
 
 
 def _render_cleanse(step: CleanseStep) -> str:
@@ -230,6 +257,7 @@ _RENDERERS: dict[type, Callable[[Any], str]] = {
     DistinctStep: _render_distinct,
     RecordIdStep: _render_record_id,
     CleanseStep: _render_cleanse,
+    MacroCallStep: _render_macro_call,
     AggregateStep: _render_aggregate,
     CallFunctionStep: _render_call_function,
     WriteStep: _render_write,
@@ -245,7 +273,7 @@ def _render_step(step: Step) -> str:
 
 def _function_imports(spec: PipelineSpec) -> list[str]:
     imports = []
-    if any(isinstance(step, RecordIdStep) for step in spec.steps):
+    if any(isinstance(step, RecordIdStep) for step in _all_steps(spec)):
         imports.append("from pyspark.sql.window import Window")
     for name in spec.functions_used:
         fn = get_function(name)
@@ -267,6 +295,7 @@ def render_pyspark(spec: PipelineSpec) -> str:
         parts.append("\n".join(imports))
     if _uses_cleanse(spec):
         parts.append(_CLEANSE_UTILITY)
+    parts.extend(_render_macro_utilities(spec))
     parts.append("\n\ndef run(spark) -> None:  # noqa: ANN001")
     body_lines = [_render_step(step) for step in spec.steps]
     indented = "\n".join("    " + line.replace("\n", "\n    ") for line in body_lines)
@@ -293,6 +322,7 @@ def render_databricks_notebook(spec: PipelineSpec) -> str:
     cells = ["\n".join(imports)]
     if _uses_cleanse(spec):
         cells.append(_CLEANSE_UTILITY.strip())
+    cells.extend(part.strip() for part in _render_macro_utilities(spec))
     cells.extend(_render_step(step) for step in spec.steps)
 
     header = (
@@ -353,6 +383,7 @@ def render_sdp(spec: PipelineSpec) -> str:
         parts.append("\n".join(imports))
     if _uses_cleanse(spec):
         parts.append(_CLEANSE_UTILITY)
+    parts.extend(_render_macro_utilities(spec))
 
     # Bronze: raw landing, one table per source.
     bronze_names: dict[str, str] = {}
