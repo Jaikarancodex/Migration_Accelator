@@ -14,13 +14,16 @@ from typing import Any
 from convert.expr import alteryx_expr_to_spark
 from convert.spec import (
     AggregateStep,
+    AppendFieldsStep,
     CallFunctionStep,
     CleanseStep,
     DistinctStep,
     FilterStep,
+    FindReplaceStep,
     JoinStep,
     MacroCallStep,
     PipelineSpec,
+    PythonScriptStep,
     ReadStep,
     RecordIdStep,
     SelectStep,
@@ -162,6 +165,74 @@ def _uses_cleanse(spec: PipelineSpec) -> bool:
     return any(isinstance(step, CleanseStep) for step in _all_steps(spec))
 
 
+_AYX_READ = re.compile(r"Alteryx\.read\(\s*[\"']#\d+[\"']\s*\)")
+_AYX_WRITE = re.compile(r"Alteryx\.write\(\s*(.+?)\s*,\s*\d+\s*\)")
+_AYX_CONST = re.compile(r"Alteryx\.getWorkflowConstant\(([^)]*)\)")
+
+
+def adapt_python_code(code: str) -> str:
+    """Rewrite Alteryx Python-tool code to run outside Designer.
+
+    - ayx imports and installPackages calls are commented out;
+    - Alteryx.read("#N") becomes the pandas input dataframe;
+    - Alteryx.write(x, n) captures x as the output dataframe;
+    - getWorkflowConstant becomes a TODO (no equivalent at runtime).
+    """
+    lines: list[str] = []
+    for line in code.splitlines():
+        stripped = line.strip()
+        if (
+            stripped.startswith(("from ayx", "import ayx"))
+            or "Package.installPackages" in stripped
+        ):
+            lines.append("# [migrated] " + line)
+            continue
+        line = _AYX_READ.sub("_input_pdf", line)
+        line = _AYX_WRITE.sub(r"_output_pdf = \1", line)
+        line = _AYX_CONST.sub(r"None  # TODO: getWorkflowConstant(\1) has no runtime equivalent", line)
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _render_python_script(step: PythonScriptStep) -> str:
+    adapted = adapt_python_code(step.code)
+    indented = "\n".join("    " + line if line.strip() else line for line in adapted.splitlines())
+    fn = f"_python_script_{step.id}"
+    return (
+        f"def {fn}(df):  # noqa: ANN001, ANN201\n"
+        f'    """Auto-adapted from the Alteryx Python tool — REVIEW REQUIRED.\n'
+        f"    Runs on the driver via pandas; validate for large data volumes.\n"
+        f'    """\n'
+        f"    _input_pdf = df.toPandas()\n"
+        f"    _output_pdf = _input_pdf\n"
+        f"{indented}\n"
+        f"    return spark.createDataFrame(_output_pdf)\n"
+        f"{_var(step.id)} = {fn}({_var(step.input)})"
+    )
+
+
+def _render_find_replace(step: FindReplaceStep) -> str:
+    mode_note = (
+        "  # NOTE: Alteryx mode was FindAny (substring match); this renders an exact-match join"
+        if step.find_mode == "FindAny"
+        else ""
+    )
+    lookup = (
+        f'{_var(step.right)}.select(F.col("{step.search_column}").alias("__fr_key"), '
+        f'F.col("{step.replace_column}").alias("__fr_val")).dropDuplicates(["__fr_key"])'
+    )
+    return (
+        f'{_var(step.id)} = {_var(step.left)}.join({lookup}, '
+        f'on=F.col("{step.find_column}") == F.col("__fr_key"), how="left"){mode_note}\n'
+        f'{_var(step.id)} = {_var(step.id)}.withColumn("{step.find_column}", '
+        f'F.coalesce(F.col("__fr_val"), F.col("{step.find_column}"))).drop("__fr_key", "__fr_val")'
+    )
+
+
+def _render_append_fields(step: AppendFieldsStep) -> str:
+    return f"{_var(step.id)} = {_var(step.target)}.crossJoin({_var(step.source)})"
+
+
 def _render_macro_call(step: MacroCallStep) -> str:
     return f"{_var(step.id)} = {step.macro}({_var(step.input)})"
 
@@ -258,6 +329,9 @@ _RENDERERS: dict[type, Callable[[Any], str]] = {
     RecordIdStep: _render_record_id,
     CleanseStep: _render_cleanse,
     MacroCallStep: _render_macro_call,
+    PythonScriptStep: _render_python_script,
+    FindReplaceStep: _render_find_replace,
+    AppendFieldsStep: _render_append_fields,
     AggregateStep: _render_aggregate,
     CallFunctionStep: _render_call_function,
     WriteStep: _render_write,
@@ -412,7 +486,7 @@ def render_sdp(spec: PipelineSpec) -> str:
         body: list[str] = []
         referenced: set[str] = set()
         for step in gold_steps:
-            for attr in ("input", "left", "right"):
+            for attr in ("input", "left", "right", "target", "source"):
                 value = getattr(step, attr, None)
                 if value is not None and value not in gold_ids:
                     referenced.add(value)

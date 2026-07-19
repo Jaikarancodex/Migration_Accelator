@@ -112,6 +112,42 @@ class RecordIdStep(BaseModel):
     column: str = "RecordID"
 
 
+class PythonScriptStep(BaseModel):
+    """Alteryx Python tool: the embedded notebook auto-adapted to run on Databricks.
+
+    The renderer wraps the code in a function that converts the input to
+    pandas, rewrites Alteryx.read/write calls, and returns a Spark dataframe.
+    Runs on the driver — review for large data volumes.
+    """
+
+    op: Literal["python_script"] = "python_script"
+    id: str
+    input: str
+    code: str
+
+
+class FindReplaceStep(BaseModel):
+    """Alteryx Find Replace: lookup-join `right` and replace values in `find_column`."""
+
+    op: Literal["find_replace"] = "find_replace"
+    id: str
+    left: str  # data stream (F)
+    right: str  # lookup stream (R)
+    find_column: str
+    search_column: str
+    replace_column: str
+    find_mode: str = "FindAny"
+
+
+class AppendFieldsStep(BaseModel):
+    """Alteryx Append Fields: cartesian-append `source`'s fields onto `target`."""
+
+    op: Literal["append_fields"] = "append_fields"
+    id: str
+    target: str
+    source: str
+
+
 class MacroCallStep(BaseModel):
     """Invoke a converted .yxmc macro, emitted as a generated utility function."""
 
@@ -174,6 +210,9 @@ Step = Annotated[
     | RecordIdStep
     | CleanseStep
     | MacroCallStep
+    | PythonScriptStep
+    | FindReplaceStep
+    | AppendFieldsStep
     | AggregateStep
     | CallFunctionStep
     | WriteStep,

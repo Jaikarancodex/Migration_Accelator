@@ -167,16 +167,19 @@ CATALOG: list[ToolMapping] = [
         plugin_suffix="AppendFields.AppendFields",
         category="Join",
         what_it_does="Appends every source row's fields onto every target row (cartesian).",
-        databricks_logic="df_target.crossJoin(df_source) — usually the source side is a "
-        "single-row stream of scalars/aggregates.",
+        databricks_logic="Converted automatically to df_target.crossJoin(df_source) — usually "
+        "the source side is a single-row stream of scalars/aggregates.",
+        parser_supported=True,
     ),
     ToolMapping(
         tool="Find Replace",
         plugin_suffix="FindReplace.FindReplace",
         category="Join",
         what_it_does="Looks up values from a reference stream and replaces/appends fields.",
-        databricks_logic="A left join against the lookup dataframe followed by "
-        "F.coalesce(replacement, original); F.regexp_replace for in-string replacement mode.",
+        databricks_logic="Converted automatically: a left join against the lookup dataframe "
+        "plus F.coalesce(replacement, original). Substring (FindAny) mode renders as an "
+        "exact-match join with a review note.",
+        parser_supported=True,
     ),
     ToolMapping(
         tool="Text To Columns",
@@ -244,6 +247,41 @@ CATALOG: list[ToolMapping] = [
         what_it_does="Outputs a single row with the stream's record count.",
         databricks_logic="df.agg(F.count(F.lit(1)).alias('Count')) — keep it as a dataframe so "
         "downstream steps can Append Fields / join it.",
+    ),
+    ToolMapping(
+        tool="Python (Jupyter)",
+        plugin_suffix="JupyterCode",
+        category="Developer",
+        what_it_does="Runs pandas/python code from an embedded Jupyter notebook.",
+        databricks_logic="Converted automatically: the notebook's code cells are extracted and "
+        "wrapped in a generated function (input.toPandas() in, spark.createDataFrame out) with "
+        "Alteryx.read/write rewritten. Runs on the driver — review for large data volumes.",
+        parser_supported=True,
+    ),
+    ToolMapping(
+        tool="Directory",
+        plugin_suffix="Directory.Directory",
+        category="In/Out",
+        what_it_does="Lists files in a folder as rows (name, path, size, dates).",
+        databricks_logic="dbutils.fs.ls('/Volumes/...') collected into a dataframe, or "
+        "spark.read with a glob path when the listing just feeds a reader.",
+    ),
+    ToolMapping(
+        tool="Dynamic Input",
+        plugin_suffix="DynamicInput.DynamicInput",
+        category="Developer",
+        what_it_does="Reads many files/queries driven by an incoming list of paths.",
+        databricks_logic="spark.read.format(...).load(list_of_paths) — Spark readers accept "
+        "multiple paths/globs natively, so the per-row read loop usually collapses into one read.",
+    ),
+    ToolMapping(
+        tool="Sharepoint Input",
+        plugin_suffix="SharepointInput.SharepointInput",
+        category="Connector",
+        what_it_does="Reads lists/files from Sharepoint.",
+        databricks_logic="Land the Sharepoint data into a Volume or table first (Lakeflow "
+        "connector, Azure Data Factory, or a scheduled copy), then spark.read from there; "
+        "a todo_source_* placeholder table is generated for the read.",
     ),
     ToolMapping(
         tool="Macro Input",

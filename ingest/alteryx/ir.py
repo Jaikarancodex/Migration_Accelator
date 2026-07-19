@@ -27,6 +27,9 @@ class ToolType(StrEnum):
     MACRO = "macro"  # references a .yxmc macro workflow by name
     MACRO_INPUT = "macro_input"  # placeholder input inside a .yxmc
     MACRO_OUTPUT = "macro_output"  # placeholder output inside a .yxmc
+    PYTHON = "python"  # Alteryx Python tool (embedded Jupyter notebook)
+    FIND_REPLACE = "find_replace"
+    APPEND_FIELDS = "append_fields"
     SUMMARIZE = "summarize"
     OUTPUT = "output"
     UNSUPPORTED = "unsupported"
@@ -61,6 +64,15 @@ class SortField(BaseModel):
 
     field: str
     descending: bool = False
+
+
+class FindReplaceConfig(BaseModel):
+    """Alteryx Find Replace tool: lookup-join a reference stream and replace values."""
+
+    find_column: str  # column in the data (F) stream searched
+    search_column: str  # column in the lookup (R) stream matched against
+    replace_column: str  # column in the lookup (R) stream supplying replacements
+    find_mode: str = "FindAny"  # "FindAny" (substring) | whole-field match
 
 
 class CleanseConfig(BaseModel):
@@ -103,6 +115,11 @@ class Node(BaseModel):
     record_id_field: str | None = None  # RECORD_ID
     cleanse: CleanseConfig | None = None  # CLEANSE
     macro_name: str | None = None  # MACRO: the referenced .yxmc name (stem, lowercase)
+    python_code: str | None = None  # PYTHON: code cells of the embedded notebook
+    find_replace: FindReplaceConfig | None = None  # FIND_REPLACE
+    upstream_labels: dict[str, str] = Field(
+        default_factory=dict, description="Connection label -> origin tool id (e.g. Left/Right)"
+    )
     summarize_actions: list[SummarizeAction] = Field(default_factory=list)  # SUMMARIZE
     output_path: str | None = None  # OUTPUT
 
@@ -135,6 +152,10 @@ class Workflow(BaseModel):
 
     def node_by_id(self, tool_id: str) -> Node | None:
         return next((n for n in self.nodes if n.tool_id == tool_id), None)
+
+    def referenced_macros(self) -> list[str]:
+        """Names (stems, lowercase) of .yxmc macros this workflow invokes."""
+        return sorted({n.macro_name for n in self.nodes if n.macro_name})
 
     def resolve_supported_upstream(self, tool_id: str) -> str | None:
         """Follow `tool_id` upstream through unsupported tools to the nearest supported node.

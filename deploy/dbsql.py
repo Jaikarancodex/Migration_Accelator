@@ -116,6 +116,43 @@ def csv_to_table_statements(
     return statements
 
 
+def validation_report(
+    host: str, token: str | None, warehouse_id: str, table: str
+) -> dict[str, Any]:
+    """Output validation when no Alteryx run is available to diff against.
+
+    Structural checks on the migrated output: row count, schema, per-column
+    null rates, and full-row duplicate count.
+    """
+    columns = table_columns(host, token, warehouse_id, table)
+    checked = columns[:20]
+    null_selects = ", ".join(
+        f"SUM(CASE WHEN `{c}` IS NULL THEN 1 ELSE 0 END) AS `{c}`" for c in checked
+    )
+    stats = run_sql(
+        host, token, warehouse_id,
+        f"SELECT COUNT(*) AS __rows, {null_selects} FROM {table}",
+    )
+    row = stats["rows"][0]
+    total = int(row[0])
+    null_counts = dict(zip(checked, row[1:], strict=False))
+
+    dupes = run_sql(
+        host, token, warehouse_id,
+        f"SELECT (SELECT COUNT(*) FROM {table}) - "
+        f"(SELECT COUNT(*) FROM (SELECT DISTINCT * FROM {table}))",
+    )["rows"][0][0]
+
+    return {
+        "table": table,
+        "row_count": total,
+        "columns": columns,
+        "null_counts": null_counts,
+        "duplicate_rows": int(dupes),
+        "passed": total > 0,
+    }
+
+
 def parity_check(
     host: str,
     token: str | None,

@@ -205,6 +205,65 @@ def test_render_cleanse_emits_inline_utility_in_all_formats() -> None:
     assert "cleanse_columns(" in silver
 
 
+def test_adapt_python_code_rewrites_alteryx_calls() -> None:
+    from convert.renderer import adapt_python_code
+
+    code = (
+        "from ayx import Alteryx\n"
+        "import pandas as pd\n"
+        'data = Alteryx.read("#1")\n'
+        "df2 = data.dropna()\n"
+        "Alteryx.write(df2, 1)\n"
+    )
+    adapted = adapt_python_code(code)
+    assert "# [migrated] from ayx import Alteryx" in adapted
+    assert "data = _input_pdf" in adapted
+    assert "_output_pdf = df2" in adapted
+    assert "Alteryx.write" not in adapted
+
+
+def test_render_python_script_step_wraps_code() -> None:
+    from convert.spec import PythonScriptStep
+
+    spec = PipelineSpec(
+        name="py_case", language="pyspark", source=SOURCE, target=TARGET,
+        steps=[
+            ReadStep(id="r", source_table="t", alias="raw"),
+            PythonScriptStep(id="p", input="r", code='x = Alteryx.read("#1")\nAlteryx.write(x, 1)'),
+            WriteStep(id="w", input="p", target_table="main.x.out", mode="overwrite"),
+        ],
+    )
+    source = render_pyspark(spec)
+    compile(source, "<generated>", "exec")
+    assert "def _python_script_p(df):" in source
+    assert "_input_pdf = df.toPandas()" in source
+    assert "return spark.createDataFrame(_output_pdf)" in source
+    assert "df_p = _python_script_p(df_r)" in source
+
+
+def test_render_find_replace_and_append_fields() -> None:
+    from convert.spec import AppendFieldsStep, FindReplaceStep
+
+    spec = PipelineSpec(
+        name="fr_case", language="pyspark", source=SOURCE, target=TARGET,
+        steps=[
+            ReadStep(id="data", source_table="t1", alias="data"),
+            ReadStep(id="lookup", source_table="t2", alias="lookup"),
+            FindReplaceStep(
+                id="fr", left="data", right="lookup",
+                find_column="Child", search_column="Flat Component", replace_column="Pcode",
+            ),
+            AppendFieldsStep(id="ap", target="fr", source="lookup"),
+            WriteStep(id="w", input="ap", target_table="main.x.out", mode="overwrite"),
+        ],
+    )
+    source = render_pyspark(spec)
+    compile(source, "<generated>", "exec")
+    assert '"__fr_key"' in source
+    assert 'F.coalesce(F.col("__fr_val"), F.col("Child"))' in source
+    assert "df_ap = df_fr.crossJoin(df_lookup)" in source
+
+
 def test_render_distinct_without_keys_uses_all_columns() -> None:
     spec = PipelineSpec(
         name="all_cols", language="pyspark", source=SOURCE, target=TARGET,

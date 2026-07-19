@@ -12,6 +12,7 @@ parses.
 from __future__ import annotations
 
 import contextlib
+import json
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -23,6 +24,7 @@ from defusedxml.ElementTree import parse as safe_parse
 from ingest.alteryx.ir import (
     CleanseConfig,
     FieldSelection,
+    FindReplaceConfig,
     FormulaExpression,
     JoinInput,
     Node,
@@ -59,6 +61,9 @@ _PLUGIN_TOOL_TYPES: dict[str, ToolType] = {
     "DataCleansePro.DataCleansePro": ToolType.CLEANSE,
     "MacroInput.MacroInput": ToolType.MACRO_INPUT,
     "MacroOutput.MacroOutput": ToolType.MACRO_OUTPUT,
+    "JupyterCode": ToolType.PYTHON,
+    "FindReplace.FindReplace": ToolType.FIND_REPLACE,
+    "AppendFields.AppendFields": ToolType.APPEND_FIELDS,
     "Summarize.Summarize": ToolType.SUMMARIZE,
     "DbFileOutput.DbFileOutput": ToolType.OUTPUT,
 }
@@ -168,6 +173,38 @@ def _parse_unique(config: Element) -> list[str]:
     return [f.get("field", "") for f in unique_fields.findall("Field") if f.get("field")]
 
 
+def _parse_python_notebook(config: Element) -> str | None:
+    """Join the code cells of the Python tool's embedded Jupyter notebook."""
+    notebook_text = _text(config.find("Notebook"))
+    if not notebook_text:
+        return None
+    try:
+        notebook = json.loads(notebook_text)
+    except json.JSONDecodeError:
+        return None
+    cells = [
+        "".join(cell.get("source", []))
+        for cell in notebook.get("cells", [])
+        if cell.get("cell_type") == "code"
+    ]
+    code = "\n\n".join(c for c in cells if c.strip())
+    return code or None
+
+
+def _parse_find_replace(config: Element) -> FindReplaceConfig | None:
+    find = _text(config.find("FieldFind"))
+    search = _text(config.find("FieldSearch"))
+    replace = _text(config.find("ReplaceFoundField"))
+    if not (find and search and replace):
+        return None
+    return FindReplaceConfig(
+        find_column=find,
+        search_column=search,
+        replace_column=replace,
+        find_mode=_text(config.find("FindMode")) or "FindAny",
+    )
+
+
 _VALID_CASES = ("upper", "lower", "title")
 
 
@@ -234,7 +271,11 @@ def _parse_summarize(config: Element) -> list[SummarizeAction]:
     return actions
 
 
-def _parse_node(elem: Element, connections: dict[str, list[str]]) -> Node | UnsupportedTool:
+def _parse_node(
+    elem: Element,
+    connections: dict[str, list[str]],
+    labels: dict[str, dict[str, str]] | None = None,
+) -> Node | UnsupportedTool:
     tool_id = elem.get("ToolID", "")
     gui_settings = elem.find("GuiSettings")
     plugin = _plugin_name(gui_settings)
@@ -273,6 +314,7 @@ def _parse_node(elem: Element, connections: dict[str, list[str]]) -> Node | Unsu
         tool_type=tool_type,
         raw_plugin=plugin,
         upstream_ids=connections.get(tool_id, []),
+        upstream_labels=(labels or {}).get(tool_id, {}),
         annotation=_text(annotation_elem),
         position=_parse_position(gui_settings),
     )
@@ -300,6 +342,10 @@ def _parse_node(elem: Element, connections: dict[str, list[str]]) -> Node | Unsu
     elif tool_type == ToolType.MACRO:
         raw = plugin.removeprefix("Macro:")
         node.macro_name = Path(raw.replace("\\", "/")).stem.lower()
+    elif tool_type == ToolType.PYTHON:
+        node.python_code = _parse_python_notebook(config)
+    elif tool_type == ToolType.FIND_REPLACE:
+        node.find_replace = _parse_find_replace(config)
     elif tool_type == ToolType.SUMMARIZE:
         node.summarize_actions = _parse_summarize(config)
     elif tool_type == ToolType.OUTPUT:
@@ -324,12 +370,19 @@ def _iter_node_elements(parent: Element) -> Iterator[Element]:
         yield node_elem
 
 
-def _parse_connections(root: Element) -> dict[str, list[str]]:
-    """Map destination ToolID -> list of origin ToolIDs (upstream nodes)."""
+def _parse_connections(root: Element) -> tuple[dict[str, list[str]], dict[str, dict[str, str]]]:
+    """Map destination ToolID -> origin ToolIDs, plus labeled inputs.
+
+    The second mapping keys each destination's inputs by the destination
+    connection name (Left/Right, Targe/Source, F/R...), which is what makes
+    two-input tools (Join, Find Replace, Append Fields) side-exact instead
+    of order-guessed.
+    """
     upstream: dict[str, list[str]] = {}
+    labels: dict[str, dict[str, str]] = {}
     connections_elem = root.find("Connections")
     if connections_elem is None:
-        return upstream
+        return upstream, labels
     for conn in connections_elem.findall("Connection"):
         origin = conn.find("Origin")
         destination = conn.find("Destination")
@@ -340,7 +393,10 @@ def _parse_connections(root: Element) -> dict[str, list[str]]:
         if not origin_id or not dest_id:
             continue
         upstream.setdefault(dest_id, []).append(origin_id)
-    return upstream
+        label = destination.get("Connection")
+        if label:
+            labels.setdefault(dest_id, {})[label] = origin_id
+    return upstream, labels
 
 
 def parse_yxmd(path: str | Path) -> Workflow:
@@ -354,7 +410,7 @@ def parse_yxmd(path: str | Path) -> Workflow:
     tree = safe_parse(str(path))
     root = tree.getroot()
 
-    connections = _parse_connections(root)
+    connections, connection_labels = _parse_connections(root)
 
     nodes: list[Node] = []
     unsupported: list[UnsupportedTool] = []
@@ -373,7 +429,7 @@ def parse_yxmd(path: str | Path) -> Workflow:
         ):
             logger.debug("ignored_gui_tool", file=str(path), plugin=plugin)
             continue
-        parsed = _parse_node(node_elem, connections)
+        parsed = _parse_node(node_elem, connections, connection_labels)
         if isinstance(parsed, UnsupportedTool):
             logger.warning(
                 "unsupported_tool", file=str(path), tool_id=parsed.tool_id, plugin=parsed.plugin

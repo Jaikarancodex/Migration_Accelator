@@ -40,6 +40,7 @@ from deploy.dbsql import (
     first_warehouse_id,
     parity_check,
     run_sql,
+    validation_report,
 )
 from deploy.export import deploy_bundle, export_bundle_from_spec, run_bundle_job
 from ingest.alteryx.parser import parse_yxmd
@@ -232,6 +233,17 @@ with tab_quick:
                     f"Parsed **{wf_name}**: {len(workflow.nodes)} tools converted, "
                     f"{len(workflow.unsupported)} need manual attention."
                 )
+                missing_macros = [
+                    m for m in workflow.referenced_macros()
+                    if m not in _repo().list_macro_names()
+                ]
+                if missing_macros:
+                    st.warning(
+                        "This workflow uses macros that are not registered yet: "
+                        + ", ".join(f"{m}.yxmc" for m in missing_macros)
+                        + ". They will be bridged over — upload the .yxmc files in the "
+                        "sidebar's Macros section and migrate again to convert them fully."
+                    )
 
                 st.write("**2/4** Converting to a Databricks pipeline spec...")
                 quick_target = TargetRef(catalog="workspace", schema="default", layer="bronze")
@@ -473,25 +485,66 @@ with tab_parity:
     migrated_table = st.text_input(
         "Migrated output table", value="workspace.default.certifications_new"
     )
-    expected_csv = st.file_uploader(
-        "Alteryx output export (.csv)", type=["csv"], key="parity_csv",
-        help="Export the original workflow's output from Alteryx as CSV and upload it here.",
+
+    parity_mode = st.radio(
+        "Comparison source",
+        [
+            "Alteryx output CSV (best: row-level proof)",
+            "Existing expected table",
+            "No Alteryx access - structural validation only",
+        ],
+        help="No access to run the original Alteryx workflow? The third mode validates "
+        "the migrated output on its own: row count, schema, null rates, duplicates.",
     )
-    expected_table = st.text_input(
-        "...or an existing expected table",
-        value="",
-        help="Leave blank when uploading a CSV; the CSV is loaded into expected_<name>.",
-    )
-    ignore_raw = st.text_input(
-        "Columns to exclude from the diff (comma-separated)",
-        value="Load_Date",
-        help="Non-deterministic columns: load timestamps, run ids, sequence columns "
-        "whose order Alteryx and Spark assign differently.",
-    )
+    expected_csv = None
+    expected_table = ""
+    ignore_raw = ""
+    if parity_mode.startswith("Alteryx output"):
+        expected_csv = st.file_uploader(
+            "Alteryx output export (.csv)", type=["csv"], key="parity_csv",
+            help="Export the original workflow's output from Alteryx as CSV and upload it here.",
+        )
+    elif parity_mode.startswith("Existing"):
+        expected_table = st.text_input("Expected table name", value="")
+    if not parity_mode.startswith("No Alteryx"):
+        ignore_raw = st.text_input(
+            "Columns to exclude from the diff (comma-separated)",
+            value="Load_Date",
+            help="Non-deterministic columns: load timestamps, run ids, sequence columns "
+            "whose order Alteryx and Spark assign differently.",
+        )
 
     if st.button("Run parity check", type="primary"):
         if not parity_token:
             st.error("An access token is required.")
+        elif parity_mode.startswith("No Alteryx"):
+            try:
+                with st.spinner("Validating migrated output..."):
+                    warehouse = first_warehouse_id(parity_host, parity_token)
+                    report = validation_report(
+                        parity_host, parity_token, warehouse, migrated_table.strip()
+                    )
+            except SqlError as exc:
+                st.error(str(exc))
+                st.stop()
+            if report["passed"]:
+                st.success(f"Table exists with {report['row_count']} rows.")
+            else:
+                st.error("Table is empty — the migrated job may not have run.")
+            st.write(f"Columns ({len(report['columns'])}): " + ", ".join(report["columns"]))
+            st.write(f"Full-row duplicates: {report['duplicate_rows']}")
+            nulls = {c: int(n) for c, n in report["null_counts"].items() if int(n) > 0}
+            if nulls:
+                st.write("Columns containing nulls:")
+                st.dataframe([{"column": c, "nulls": n} for c, n in nulls.items()],
+                             use_container_width=True)
+            else:
+                st.write("No nulls in the checked columns.")
+            st.caption(
+                "Structural validation only — for row-level proof, export the legacy "
+                "system's historical output (even a one-off table dump) and use the "
+                "CSV or expected-table mode."
+            )
         else:
             try:
                 with st.spinner("Finding SQL warehouse..."):

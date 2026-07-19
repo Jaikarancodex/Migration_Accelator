@@ -20,15 +20,18 @@ import re
 from convert.spec import (
     AggregateStep,
     Aggregation,
+    AppendFieldsStep,
     CleanseStep,
     ColumnSelection,
     ComputedColumn,
     DistinctStep,
     FilterStep,
+    FindReplaceStep,
     JoinStep,
     MacroCallStep,
     MacroUtility,
     PipelineSpec,
+    PythonScriptStep,
     ReadStep,
     RecordIdStep,
     SelectStep,
@@ -184,10 +187,15 @@ class _Converter:
             return WithColumnsStep(id=node.tool_id, input=self._input_id(node), columns=computed)
 
         if node.tool_type == ToolType.JOIN:
-            left_id = self._resolve(node.upstream_ids[0]) if node.upstream_ids else node.tool_id
-            right_id = (
-                self._resolve(node.upstream_ids[1]) if len(node.upstream_ids) > 1 else left_id
+            labels = node.upstream_labels
+            left_raw = labels.get("Left") or (
+                node.upstream_ids[0] if node.upstream_ids else node.tool_id
             )
+            right_raw = labels.get("Right") or (
+                node.upstream_ids[1] if len(node.upstream_ids) > 1 else left_raw
+            )
+            left_id = self._resolve(left_raw)
+            right_id = self._resolve(right_raw)
             left_keys = next((j.keys for j in node.join_inputs if j.side == "left"), [])
             right_keys = next((j.keys for j in node.join_inputs if j.side == "right"), [])
             return JoinStep(
@@ -223,6 +231,47 @@ class _Converter:
                 id=node.tool_id,
                 input=self._input_id(node),
                 column=node.record_id_field or "RecordID",
+            )
+
+        if node.tool_type == ToolType.PYTHON:
+            if not node.python_code:
+                self._elided[node.tool_id] = self._input_id(node)
+                return None
+            return PythonScriptStep(
+                id=node.tool_id, input=self._input_id(node), code=node.python_code
+            )
+
+        if node.tool_type == ToolType.FIND_REPLACE:
+            if node.find_replace is None:
+                self._elided[node.tool_id] = self._input_id(node)
+                return None
+            labels = node.upstream_labels
+            left = labels.get("Find") or labels.get("F") or (
+                node.upstream_ids[0] if node.upstream_ids else node.tool_id
+            )
+            right = labels.get("Replace") or labels.get("R") or (
+                node.upstream_ids[1] if len(node.upstream_ids) > 1 else left
+            )
+            return FindReplaceStep(
+                id=node.tool_id,
+                left=self._resolve(left),
+                right=self._resolve(right),
+                find_column=node.find_replace.find_column,
+                search_column=node.find_replace.search_column,
+                replace_column=node.find_replace.replace_column,
+                find_mode=node.find_replace.find_mode,
+            )
+
+        if node.tool_type == ToolType.APPEND_FIELDS:
+            labels = node.upstream_labels
+            target_id = labels.get("Targe") or labels.get("Target") or (
+                node.upstream_ids[0] if node.upstream_ids else node.tool_id
+            )
+            source_id = labels.get("Source") or (
+                node.upstream_ids[1] if len(node.upstream_ids) > 1 else target_id
+            )
+            return AppendFieldsStep(
+                id=node.tool_id, target=self._resolve(target_id), source=self._resolve(source_id)
             )
 
         if node.tool_type == ToolType.MACRO:
@@ -286,8 +335,10 @@ class _Converter:
 
 
 def _step_inputs(step: Step) -> list[str]:
-    if isinstance(step, JoinStep):
+    if isinstance(step, JoinStep | FindReplaceStep):
         return [step.left, step.right]
+    if isinstance(step, AppendFieldsStep):
+        return [step.target, step.source]
     if isinstance(step, UnionStep):
         return list(step.inputs)
     input_id = getattr(step, "input", None)
