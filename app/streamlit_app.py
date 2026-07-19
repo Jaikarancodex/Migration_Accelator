@@ -30,14 +30,20 @@ from pydantic import ValidationError
 from app.offline_convert import naive_spec_from_workflow
 from configs.loader import load_yaml_config
 from configs.models import DeployDefaultsConfig, TargetDefaultsConfig
-from convert.renderer import render_pyspark
+from convert.renderer import render_databricks_notebook, render_pyspark, render_sdp
 from convert.spec import MedallionLayer, PipelineSpec, TargetRef
-from deploy.dab import build_databricks_yml, default_bundle, single_target_bundle
+from deploy.dab import ArtifactFormat, build_databricks_yml, default_bundle, single_target_bundle
 from eval.schema import ColumnSchema, ColumnType, TableSchema
 from eval.synthetic import generate_synthetic_rows
 from ingest.alteryx.parser import parse_yxmd
 from llm.client import AnthropicLLMClient
 from llm.convert import SpecGenerationError, generate_pipeline_spec
+from llm.recommend import (
+    DeploymentRecommendation,
+    RecommendationError,
+    heuristic_recommendation,
+    recommend_deployment_format,
+)
 from repo.graph import CyclicDependencyError, DependencyGraph
 from repo.store import MigrationRepo
 
@@ -201,6 +207,13 @@ with tab_convert:
                 except (yaml.YAMLError, ValidationError) as exc:
                     st.error(f"Validation failed: {exc}")
 
+FORMAT_LABELS: dict[ArtifactFormat, str] = {
+    "job": "Job script (spark_python_task)",
+    "notebook": "Notebook (notebook_task)",
+    "sdp": "SDP / Declarative Pipeline (dlt)",
+}
+FORMAT_ORDER: list[ArtifactFormat] = ["job", "notebook", "sdp"]
+
 with tab_code:
     if not object_names:
         st.info("Ingest and convert an object first.")
@@ -212,9 +225,48 @@ with tab_code:
         if stored_spec is None:
             st.info("Generate and validate a spec for this object in the Convert tab first.")
         else:
-            code = render_pyspark(stored_spec)
-            st.code(code, language="python")
-            st.download_button("Download .py", data=code, file_name=f"{selected}.py", mime="text/x-python")
+            rec_key = f"format_rec::{selected}"
+            if st.button("Recommend format (LLM)", key=f"recommend::{selected}"):
+                workflow = repo.read_workflow(selected)
+                try:
+                    if has_key:
+                        rec = recommend_deployment_format(AnthropicLLMClient(), workflow)
+                    else:
+                        rec = heuristic_recommendation(workflow)
+                        st.toast("No API key — using the rule-based recommendation instead.")
+                    st.session_state[rec_key] = rec
+                    st.session_state.pop(f"format_choice::{selected}", None)
+                except RecommendationError as exc:
+                    st.error(str(exc))
+
+            stored_rec = cast("DeploymentRecommendation | None", st.session_state.get(rec_key))
+            if stored_rec is not None:
+                st.info(f"**Recommended: {FORMAT_LABELS[stored_rec.format]}** — {stored_rec.rationale}")
+
+            default_index = FORMAT_ORDER.index(stored_rec.format) if stored_rec is not None else 0
+            chosen_label = st.radio(
+                "Output format",
+                [FORMAT_LABELS[f] for f in FORMAT_ORDER],
+                index=default_index,
+                horizontal=True,
+                key=f"format_choice::{selected}",
+            )
+            chosen_format = next(f for f, label in FORMAT_LABELS.items() if label == chosen_label)
+            st.session_state[f"artifact_format::{selected}"] = chosen_format
+
+            try:
+                if chosen_format == "notebook":
+                    code = render_databricks_notebook(stored_spec)
+                elif chosen_format == "sdp":
+                    code = render_sdp(stored_spec)
+                else:
+                    code = render_pyspark(stored_spec)
+                st.code(code, language="python")
+                st.download_button(
+                    "Download .py", data=code, file_name=f"{selected}.py", mime="text/x-python"
+                )
+            except ValueError as exc:
+                st.error(str(exc))
 
 with tab_parity:
     st.subheader("Synthetic data preview")
@@ -247,6 +299,14 @@ with tab_deploy:
         selected = st.selectbox("Object", object_names, key="deploy_object")
         bundle_name = st.text_input("Bundle name", value=DEPLOY_DEFAULTS.bundle_name)
 
+        artifact_format = cast(
+            ArtifactFormat, st.session_state.get(f"artifact_format::{selected}", "job")
+        )
+        st.caption(
+            f"Deploying as: **{FORMAT_LABELS[artifact_format]}** "
+            "(chosen in the Generated code tab)."
+        )
+
         deploy_style = st.radio(
             "Target workspace",
             ["Azure Databricks (dev / staging / prod)", "Databricks Free Edition (single workspace)"],
@@ -274,6 +334,7 @@ with tab_deploy:
                     prod_host=prod_host,
                     catalog=DEPLOY_DEFAULTS.catalog,
                     schema=DEPLOY_DEFAULTS.schema_name,
+                    artifact_format=artifact_format,
                 )
             else:
                 bundle = single_target_bundle(
@@ -283,6 +344,7 @@ with tab_deploy:
                     workspace_host=free_host,
                     catalog=DEPLOY_DEFAULTS.catalog,
                     schema=DEPLOY_DEFAULTS.schema_name,
+                    artifact_format=artifact_format,
                 )
             yml_text = build_databricks_yml(bundle)
             st.code(yml_text, language="yaml")

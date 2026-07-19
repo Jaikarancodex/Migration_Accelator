@@ -1,6 +1,6 @@
 import pytest
 
-from convert.renderer import render_pyspark
+from convert.renderer import render_databricks_notebook, render_pyspark, render_sdp
 from convert.spec import (
     AggregateStep,
     Aggregation,
@@ -150,6 +150,43 @@ def test_render_rejects_non_pyspark_spec() -> None:
     )
     with pytest.raises(ValueError, match="sql"):
         render_pyspark(spec)
+
+
+def test_render_notebook_has_cell_markers_and_no_run_wrapper() -> None:
+    source = render_databricks_notebook(_full_spec())
+    assert source.startswith("# Databricks notebook source")
+    assert "# COMMAND ----------" in source
+    assert "def run(spark)" not in source
+    # notebook steps run at top level with the ambient spark session
+    assert 'df_raw_sales = spark.table("legacy.sales.sales_raw")' in source
+
+
+def test_render_notebook_rejects_sql_spec() -> None:
+    spec = PipelineSpec(
+        name="sql_case", language="sql", source=SOURCE, target=TARGET,
+        steps=[ReadStep(id="r", source_table="t", alias="t")],
+    )
+    with pytest.raises(ValueError, match="sql"):
+        render_databricks_notebook(spec)
+
+
+def test_render_sdp_emits_dlt_table_per_write() -> None:
+    source = render_sdp(_full_spec())
+    compile(source, "<generated>", "exec")
+    assert "import dlt" in source
+    assert '@dlt.table(name="sales_summary"' in source
+    # dlt owns the write: the table function returns the write step's input df
+    assert "return df_audited" in source
+    assert ".write.mode(" not in source
+
+
+def test_render_sdp_requires_a_write_step() -> None:
+    spec = PipelineSpec(
+        name="no_write", language="pyspark", source=SOURCE, target=TARGET,
+        steps=[ReadStep(id="r", source_table="t", alias="t")],
+    )
+    with pytest.raises(ValueError, match="write"):
+        render_sdp(spec)
 
 
 def test_render_unknown_function_raises() -> None:

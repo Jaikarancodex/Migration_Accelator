@@ -51,6 +51,42 @@ def test_write_databricks_yml_creates_file(tmp_path: Path) -> None:
     assert doc["bundle"]["name"] == "migration-accelerator"
 
 
+def test_notebook_format_emits_notebook_task() -> None:
+    bundle = single_target_bundle(
+        bundle_name="migration-accelerator",
+        pipeline_name="sales_summary",
+        python_file="./pipelines/sales_summary.py",
+        workspace_host="https://community.cloud.databricks.com",
+        catalog="main",
+        schema="migration",
+        artifact_format="notebook",
+    )
+    doc = yaml.safe_load(build_databricks_yml(bundle))
+
+    task = doc["resources"]["jobs"]["sales_summary_job"]["tasks"][0]
+    assert task["notebook_task"]["notebook_path"] == "./pipelines/sales_summary.py"
+    assert "spark_python_task" not in task
+
+
+def test_sdp_format_emits_pipeline_resource_and_no_job() -> None:
+    bundle = single_target_bundle(
+        bundle_name="migration-accelerator",
+        pipeline_name="sales_summary",
+        python_file="./pipelines/sales_summary.py",
+        workspace_host="https://community.cloud.databricks.com",
+        catalog="main",
+        schema="migration",
+        artifact_format="sdp",
+    )
+    doc = yaml.safe_load(build_databricks_yml(bundle))
+
+    assert "jobs" not in doc["resources"]
+    pipeline = doc["resources"]["pipelines"]["sales_summary_pipeline"]
+    assert pipeline["catalog"] == "main"
+    assert pipeline["schema"] == "migration"
+    assert pipeline["libraries"] == [{"file": {"path": "./pipelines/sales_summary.py"}}]
+
+
 def test_single_target_bundle_has_exactly_one_development_target() -> None:
     bundle = single_target_bundle(
         bundle_name="migration-accelerator",
