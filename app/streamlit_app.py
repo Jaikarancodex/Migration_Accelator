@@ -29,6 +29,7 @@ import yaml
 from pydantic import ValidationError
 
 from app.flow_ui import (
+    ICONS,
     Status,
     hero_html,
     pipeline_flow_html,
@@ -440,8 +441,8 @@ with tab_quick:
                     def _dflow() -> None:
                         dph.markdown(
                             pipeline_flow_html([
-                                ("Build bundle", "\U0001f4e6", dstages[0]),
-                                ("Deploy", "\U0001f680", dstages[1]),
+                                ("Build bundle", ICONS["bundle"], dstages[0]),
+                                ("Deploy", ICONS["deploy"], dstages[1]),
                             ]),
                             unsafe_allow_html=True,
                         )
@@ -530,13 +531,13 @@ with tab_quick:
             nav_next.caption("Complete this step")
 
 with tab_repo:
-    st.subheader("📊 Migration repo & flow")
+    st.subheader("Migration repo & flow")
     if not object_names:
         st.info("No objects ingested yet — use the sidebar to parse a workflow.")
     else:
         metadatas = repo.list_metadata()
 
-        st.markdown("##### 🔀 Workflow flow")
+        st.markdown("##### Workflow flow")
         canvas_obj = st.selectbox("Show flow for", object_names, key="canvas_object")
         canvas_wf = repo.read_workflow(canvas_obj)
 
@@ -546,19 +547,19 @@ with tab_repo:
         out_tables = sum(1 for n in canvas_wf.nodes if n.tool_type == ToolType.OUTPUT)
         macros_used = len(canvas_wf.referenced_macros())
         t1, t2, t3, t4 = st.columns(4)
-        t1.metric("🧩 Total tools", total)
+        t1.metric("Total tools", total)
         t2.metric(
-            "✅ Auto-converted", converted,
+            "Auto-converted", converted,
             delta=f"{round(100 * converted / total)}%" if total else None,
         )
-        t3.metric("⚠️ Manual follow-up", manual)
-        t4.metric("📤 Output tables", out_tables)
+        t3.metric("Manual follow-up", manual)
+        t4.metric("Output tables", out_tables)
         if macros_used:
-            st.caption(f"🧩 References {macros_used} macro(s): {', '.join(canvas_wf.referenced_macros())}")
+            st.caption(f"References {macros_used} macro(s): {', '.join(canvas_wf.referenced_macros())}")
 
         st.markdown(workflow_canvas_html(canvas_wf), unsafe_allow_html=True)
 
-        with st.expander("📋 Repo metadata"):
+        with st.expander("Repo metadata"):
             st.dataframe(
                 [
                     {
@@ -575,7 +576,7 @@ with tab_repo:
         try:
             graph = DependencyGraph(metadatas)
             order = graph.topological_order()
-            st.markdown("##### 🧭 Topological conversion order")
+            st.markdown("##### Topological conversion order")
             st.caption("Dependencies first — leaf objects convert before the objects that read them.")
             st.code(" -> ".join(order) or "(no objects)")
             if len(order) > 1:

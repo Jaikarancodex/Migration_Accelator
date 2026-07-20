@@ -23,29 +23,103 @@ _STATUS_COLOR: dict[Status, str] = {
     "error": "#ff5c5c",
 }
 
-# Tool-type -> (emoji icon, short label) for the workflow canvas.
-_TOOL_ICON: dict[ToolType, tuple[str, str]] = {
-    ToolType.INPUT: ("\U0001f4e5", "Input"),        # inbox tray
-    ToolType.OUTPUT: ("\U0001f4e4", "Output"),       # outbox tray
-    ToolType.SELECT: ("\U0001f5c2️", "Select"),  # card index dividers
-    ToolType.FILTER: ("\U0001f50d", "Filter"),        # magnifier
-    ToolType.FORMULA: ("\U0001f9ee", "Formula"),      # abacus
-    ToolType.JOIN: ("\U0001f517", "Join"),            # link
-    ToolType.UNION: ("\U0001f9f1", "Union"),          # bricks
-    ToolType.SORT: ("\U0001f523", "Sort"),            # symbols
-    ToolType.UNIQUE: ("\U0001f3af", "Unique"),        # target
-    ToolType.RECORD_ID: ("\U0001f522", "Record ID"),  # 1234
-    ToolType.CLEANSE: ("\U0001f9f9", "Cleanse"),      # broom
-    ToolType.SUMMARIZE: ("\U0001f4ca", "Summarize"),  # bar chart
-    ToolType.MACRO: ("\U0001f9e9", "Macro"),          # puzzle
-    ToolType.MACRO_INPUT: ("\U0001f4e5", "Macro In"),
-    ToolType.MACRO_OUTPUT: ("\U0001f4e4", "Macro Out"),
-    ToolType.PYTHON: ("\U0001f40d", "Python"),        # snake
-    ToolType.FIND_REPLACE: ("\U0001f501", "Find/Replace"),  # repeat
-    ToolType.APPEND_FIELDS: ("\U0001f9f7", "Append"),  # safety pin
+def _svg(inner: str, size: int = 18) -> str:
+    """Wrap SVG path content in a Feather/Lucide-style stroke icon (currentColor)."""
+    return (
+        f'<svg viewBox="0 0 24 24" width="{size}" height="{size}" fill="none" '
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        f'stroke-linejoin="round">{inner}</svg>'
+    )
+
+
+# Category SVG glyphs (monochrome, inherit the node's accent via currentColor).
+_CATEGORY_SVG: dict[str, str] = {
+    "input": _svg(
+        '<ellipse cx="12" cy="5" rx="8" ry="3"/>'
+        '<path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/>'
+        '<path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>'
+    ),
+    "output": _svg(
+        '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
+        '<polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>'
+    ),
+    "prep": _svg(
+        '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/>'
+        '<line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/>'
+        '<line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>'
+        '<line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/>'
+        '<line x1="17" y1="16" x2="23" y2="16"/>'
+    ),
+    "join": _svg(
+        '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/>'
+        '<path d="M6 21V9a9 9 0 0 0 9 9"/>'
+    ),
+    "transform": _svg(
+        '<line x1="6" y1="20" x2="6" y2="14"/><line x1="12" y1="20" x2="12" y2="8"/>'
+        '<line x1="18" y1="20" x2="18" y2="4"/>'
+    ),
+    "dev": _svg('<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>'),
+    "manual": _svg(
+        '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86'
+        'a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/>'
+        '<line x1="12" y1="17" x2="12.01" y2="17"/>'
+    ),
 }
 
-# Tool-type -> palette category, and category -> (accent color, emoji, label).
+# Migration stage glyphs, referenced by callers of pipeline_flow_html.
+ICONS: dict[str, str] = {
+    "upload": _svg(
+        '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
+        '<polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>'
+    ),
+    "convert": _svg(
+        '<polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/>'
+        '<polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/>'
+        '<line x1="4" y1="4" x2="9" y2="9"/>'
+    ),
+    "recommend": _svg(
+        '<line x1="9" y1="18" x2="15" y2="18"/><line x1="10" y1="22" x2="14" y2="22"/>'
+        '<path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8'
+        'c0 1 .23 2.23 1.5 3.5A4.61 4.61 0 0 1 8.91 14"/>'
+    ),
+    "bundle": _svg(
+        '<line x1="16.5" y1="9.4" x2="7.5" y2="4.21"/>'
+        '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8'
+        'a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>'
+        '<polyline points="3.27 6.96 12 12.01 20.73 6.96"/>'
+        '<line x1="12" y1="22.08" x2="12" y2="12"/>'
+    ),
+    "deploy": _svg(
+        '<polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/>'
+        '<path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/>'
+    ),
+    "verify": _svg(
+        '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>'
+        '<polyline points="22 4 12 14.01 9 11.01"/>'
+    ),
+}
+
+_TOOL_LABEL: dict[ToolType, str] = {
+    ToolType.INPUT: "Input",
+    ToolType.OUTPUT: "Output",
+    ToolType.SELECT: "Select",
+    ToolType.FILTER: "Filter",
+    ToolType.FORMULA: "Formula",
+    ToolType.JOIN: "Join",
+    ToolType.UNION: "Union",
+    ToolType.SORT: "Sort",
+    ToolType.UNIQUE: "Unique",
+    ToolType.RECORD_ID: "Record ID",
+    ToolType.CLEANSE: "Cleanse",
+    ToolType.SUMMARIZE: "Summarize",
+    ToolType.MACRO: "Macro",
+    ToolType.MACRO_INPUT: "Macro In",
+    ToolType.MACRO_OUTPUT: "Macro Out",
+    ToolType.PYTHON: "Python",
+    ToolType.FIND_REPLACE: "Find/Replace",
+    ToolType.APPEND_FIELDS: "Append",
+}
+
 _TOOL_CATEGORY: dict[ToolType, str] = {
     ToolType.INPUT: "input",
     ToolType.MACRO_INPUT: "input",
@@ -66,14 +140,15 @@ _TOOL_CATEGORY: dict[ToolType, str] = {
     ToolType.PYTHON: "dev",
     ToolType.MACRO: "dev",
 }
-_CATEGORY_META: dict[str, tuple[str, str, str]] = {
-    "input": ("#3b82f6", "\U0001f4e5", "Input"),
-    "output": ("#22c55e", "\U0001f4e4", "Output"),
-    "prep": ("#6366f1", "\U0001f9f0", "Prepare"),
-    "join": ("#f59e0b", "\U0001f517", "Join / Blend"),
-    "transform": ("#14b8a6", "\U0001f4ca", "Transform"),
-    "dev": ("#a855f7", "\U0001f9e9", "Developer"),
-    "manual": ("#ef4444", "⚠️", "Manual"),
+# category -> (accent color, label)
+_CATEGORY_META: dict[str, tuple[str, str]] = {
+    "input": ("#3b82f6", "Input"),
+    "output": ("#22c55e", "Output"),
+    "prep": ("#6366f1", "Prepare"),
+    "join": ("#f59e0b", "Join / Blend"),
+    "transform": ("#14b8a6", "Transform"),
+    "dev": ("#a855f7", "Developer"),
+    "manual": ("#ef4444", "Manual"),
 }
 
 _STYLE = """
@@ -84,7 +159,11 @@ ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;}
 background:rgba(127,127,127,0.08);border:1px solid rgba(127,127,127,0.28);position:relative;
 transition:box-shadow .2s ease,border-color .2s ease;}
 .ma-node .ma-ico{width:34px;height:34px;border-radius:9px;display:flex;align-items:center;
-justify-content:center;font-size:18px;background:rgba(127,127,127,0.14);flex:none;}
+justify-content:center;background:rgba(127,127,127,0.14);flex:none;color:inherit;}
+.ma-node .ma-ico svg{display:block;}
+.ma-node.running .ma-ico{color:#f5a623;}
+.ma-node.done .ma-ico{color:#2ecc71;}
+.ma-node.error .ma-ico{color:#ff5c5c;}
 .ma-node .ma-title{font-weight:600;font-size:0.92rem;line-height:1.1;}
 .ma-node .ma-sub{font-size:0.72rem;opacity:0.7;text-transform:uppercase;letter-spacing:0.04em;margin-top:2px;}
 .ma-node.pending{opacity:0.62;}
@@ -111,8 +190,9 @@ transition:transform .14s ease,box-shadow .14s ease,border-color .14s ease;}
 border-color:var(--c);}
 .ma-tnode .ma-tbar{position:absolute;top:0;left:0;right:0;height:4px;background:var(--c);}
 .ma-tnode .ma-tico{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;
-justify-content:center;font-size:19px;
-background:color-mix(in srgb, var(--c) 16%, transparent);}
+justify-content:center;color:var(--c);
+background:color-mix(in srgb, var(--c) 15%, transparent);}
+.ma-tnode .ma-tico svg{display:block;}
 .ma-tnode .ma-tlabel{font-size:0.74rem;font-weight:700;text-align:center;line-height:1.05;}
 .ma-tnode .ma-tid{font-size:0.6rem;opacity:0.5;font-weight:600;letter-spacing:0.02em;}
 .ma-tnode.unsupported{border-style:dashed;border-color:var(--c);}
@@ -238,23 +318,25 @@ def workflow_canvas_html(workflow: Workflow, max_nodes: int = 60) -> str:
     parts = [_STYLE, '<div class="ma-canvaswrap"><div class="ma-canvas">']
     used_categories: set[str] = set()
     for i, node in enumerate(ordered):
-        icon, label = _TOOL_ICON.get(node.tool_type, ("⚙️", node.tool_type.value))
+        label = _TOOL_LABEL.get(node.tool_type, node.tool_type.value)
         category = _TOOL_CATEGORY.get(node.tool_type, "prep")
         used_categories.add(category)
         color = _CATEGORY_META[category][0]
-        parts.append(_tool_node_html(icon, label, node.tool_id, color, unsupported=False))
+        svg = _CATEGORY_SVG[category]
+        parts.append(_tool_node_html(svg, label, node.tool_id, color, unsupported=False))
         if i < len(ordered) - 1:
             parts.append('<div class="ma-conn"></div>')
 
     if workflow.unsupported:
         used_categories.add("manual")
         manual_color = _CATEGORY_META["manual"][0]
+        manual_svg = _CATEGORY_SVG["manual"]
         if ordered:
             parts.append('<div class="ma-conn"></div>')
         for j, u in enumerate(workflow.unsupported):
             short = u.plugin.split(".")[-1].split("\\")[-1]
             parts.append(
-                _tool_node_html("⚠️", short[:12], u.tool_id, manual_color, unsupported=True)
+                _tool_node_html(manual_svg, short[:12], u.tool_id, manual_color, unsupported=True)
             )
             if j < len(workflow.unsupported) - 1:
                 parts.append('<div class="ma-conn"></div>')
@@ -262,8 +344,8 @@ def workflow_canvas_html(workflow: Workflow, max_nodes: int = 60) -> str:
 
     # Legend keyed to the categories actually present.
     keys = [
-        f'<span class="ma-key"><i style="background:{color}"></i>{emoji} {label}</span>'
-        for cat, (color, emoji, label) in _CATEGORY_META.items()
+        f'<span class="ma-key"><i style="background:{color}"></i>{label}</span>'
+        for cat, (color, label) in _CATEGORY_META.items()
         if cat in used_categories
     ]
     parts.append('<div class="ma-legend2">' + "".join(keys) + "</div></div>")

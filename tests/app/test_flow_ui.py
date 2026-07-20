@@ -54,6 +54,21 @@ def test_workflow_canvas_renders_tool_nodes_and_unsupported() -> None:
     assert "--c:#22c55e" in html  # output
     assert "ma-legend2" in html
     assert "ma-tbar" in html
+    # professional SVG icons (currentColor), not emoji
+    assert "<svg" in html
+    assert 'stroke="currentColor"' in html
+
+
+def test_no_emoji_in_rendered_flow_html() -> None:
+    import re
+
+    wf = Workflow(
+        source_file="x.yxmd", name="wf",
+        nodes=[Node(tool_id="1", tool_type=ToolType.INPUT, raw_plugin="DbFileInput")],
+    )
+    emoji = re.compile("[\U0001F000-\U0001FAFF☀-➿]")
+    assert not emoji.search(workflow_canvas_html(wf))
+    assert not emoji.search(pipeline_flow_html([("Deploy", "<svg/>", "running")]))
 
 
 def test_workflow_canvas_truncates_large_workflows() -> None:
