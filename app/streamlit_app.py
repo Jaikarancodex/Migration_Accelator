@@ -28,6 +28,7 @@ import streamlit as st
 import yaml
 from pydantic import ValidationError
 
+from app.flow_ui import Status, pipeline_flow_html, workflow_canvas_html
 from app.offline_convert import naive_spec_from_workflow
 from configs.loader import load_yaml_config
 from configs.models import DeployDefaultsConfig, TargetDefaultsConfig
@@ -275,18 +276,40 @@ with tab_quick:
         elif not quick_token:
             st.error("An access token is required to deploy.")
         else:
-            progress = st.status("Migrating...", expanded=True)
-            with progress:
-                st.write("**1/4** Parsing the Alteryx workflow...")
+            # n8n-style live pipeline: stages light up as each runs.
+            stage_defs = [
+                ("Parse", "\U0001f4c4"),
+                ("Convert", "\U0001f504"),
+                ("Recommend", "\U0001f9e0"),
+                ("Bundle", "\U0001f4e6"),
+                ("Deploy", "\U0001f680"),
+            ]
+            statuses: list[Status] = ["pending"] * len(stage_defs)
+            flow_ph = st.empty()
+            canvas_ph = st.empty()
+
+            def _render_flow() -> None:
+                stages = [(n, i, s) for (n, i), s in zip(stage_defs, statuses, strict=False)]
+                flow_ph.markdown(pipeline_flow_html(stages), unsafe_allow_html=True)
+
+            def _set(index: int, status: Status) -> None:
+                statuses[index] = status
+                _render_flow()
+
+            _render_flow()
+            try:
+                _set(0, "running")
                 names = _ingest_files([quick_file])
                 if not names:
-                    progress.update(label="Parse failed", state="error")
+                    _set(0, "error")
                     st.stop()
                 wf_name = names[0]
                 workflow = _repo().read_workflow(wf_name)
-                st.write(
-                    f"Parsed **{wf_name}**: {len(workflow.nodes)} tools converted, "
-                    f"{len(workflow.unsupported)} need manual attention."
+                _set(0, "done")
+                canvas_ph.markdown(workflow_canvas_html(workflow), unsafe_allow_html=True)
+                st.caption(
+                    f"Parsed **{wf_name}** — {len(workflow.nodes)} tools converted, "
+                    f"{len(workflow.unsupported)} need manual follow-up."
                 )
                 missing_macros = [
                     m for m in workflow.referenced_macros()
@@ -300,30 +323,43 @@ with tab_quick:
                         "sidebar's Macros section and migrate again to convert them fully."
                     )
 
-                st.write("**2/4** Converting to a Databricks pipeline spec...")
+                _set(1, "running")
                 quick_target = TargetRef(catalog="workspace", schema="default", layer="bronze")
                 if has_key:
                     quick_spec = generate_pipeline_spec(AnthropicLLMClient(), workflow, quick_target)
-                    rec = recommend_deployment_format(AnthropicLLMClient(), workflow)
                 else:
                     quick_spec = naive_spec_from_workflow(
                         workflow, quick_target, macros=_repo().all_macros()
                     )
-                    rec = heuristic_recommendation(workflow)
-                st.write(f"Format: **{FORMAT_LABELS[rec.format]}** — {rec.rationale}")
+                _set(1, "done")
 
-                st.write("**3/4** Writing the asset bundle...")
+                _set(2, "running")
+                rec = (
+                    recommend_deployment_format(AnthropicLLMClient(), workflow)
+                    if has_key else heuristic_recommendation(workflow)
+                )
+                _set(2, "done")
+                st.caption(f"Format: **{FORMAT_LABELS[rec.format]}** — {rec.rationale}")
+
+                _set(3, "running")
                 quick_safe = re.sub(r"\W+", "_", wf_name).strip("_").lower()
                 quick_dir = _ROOT / "bundles" / quick_safe
                 export_bundle_from_spec(
                     quick_spec, quick_dir, workspace_host=quick_host, artifact_format=rec.format
                 )
+                _set(3, "done")
 
-                st.write(f"**4/4** Deploying to {quick_host} ...")
+                _set(4, "running")
                 ok, log = deploy_bundle(quick_dir, quick_host, quick_token)
+                _set(4, "done" if ok else "error")
+            except Exception as exc:  # noqa: BLE001 - surfaced to the user
+                for i, s in enumerate(statuses):
+                    if s == "running":
+                        _set(i, "error")
+                st.error(f"Migration failed: {exc}")
+                st.stop()
 
             if ok:
-                progress.update(label="Migration deployed!", state="complete")
                 url_lines = [line.strip() for line in log.splitlines() if "URL:" in line]
                 for line in url_lines:
                     st.success(f"Job created — {line}")
@@ -348,7 +384,7 @@ with tab_quick:
                     "workspace (the generated code's spark.read/spark.table names)."
                 )
             else:
-                progress.update(label="Deploy failed", state="error")
+                st.error("Deploy failed — see details below.")
                 st.code(log)
 
     if st.session_state.get("quick_last_bundle") and st.button(
@@ -378,6 +414,12 @@ with tab_repo:
                 for m in metadatas
             ],
             use_container_width=True,
+        )
+
+        st.markdown("##### Workflow flow")
+        canvas_obj = st.selectbox("Show flow for", object_names, key="canvas_object")
+        st.markdown(
+            workflow_canvas_html(repo.read_workflow(canvas_obj)), unsafe_allow_html=True
         )
         try:
             graph = DependencyGraph(metadatas)
