@@ -49,6 +49,19 @@ from ingest.alteryx.ir import Node, ToolType, Workflow
 _AGG_FUNC_MAP = {"sum": "sum", "count": "count", "avg": "avg", "min": "min", "max": "max"}
 
 _UC_IDENTIFIER = re.compile(r"[A-Za-z0-9_]+(\.[A-Za-z0-9_]+){1,2}")
+_SQL_HINT = re.compile(r"\bselect\b.+\bfrom\b", re.IGNORECASE | re.DOTALL)
+
+
+def _looks_like_sql(raw: str) -> bool:
+    """True when an Input tool's source is a custom SQL query, not a table/path.
+
+    Alteryx lets a DbFileInput's "file" be a full query (e.g.
+    'aka:<conn>|||select * from ##TempFinalResult'). That has no table name
+    to derive — mangling the query text into an identifier (e.g.
+    'select_from_tempfinalresult') produces something that looks like a
+    real, converted table reference but silently isn't.
+    """
+    return bool(_SQL_HINT.search(raw.split("|||")[-1]))
 
 
 def _sanitize_table_name(raw: str) -> str:
@@ -69,10 +82,17 @@ def _sanitize_table_name(raw: str) -> str:
     return name or "unnamed"
 
 
-def _source_table(raw: str, target: TargetRef) -> str:
-    """Keep UC-style identifiers as-is; retarget file/DB refs into the target schema."""
+def _source_table(raw: str, target: TargetRef, node_id: str) -> str:
+    """Keep UC-style identifiers as-is; retarget file/DB refs into the target schema.
+
+    A custom-SQL source has no real table name, so it's landed as an
+    explicit todo_source_<node_id> placeholder — loud and reviewable —
+    instead of a plausible-but-wrong name derived from the query text.
+    """
     if _UC_IDENTIFIER.fullmatch(raw):
         return raw
+    if _looks_like_sql(raw):
+        return f"{target.catalog}.{target.schema_}.todo_source_{node_id}"
     return f"{target.catalog}.{target.schema_}.{_sanitize_table_name(raw)}"
 
 
@@ -157,7 +177,7 @@ class _Converter:
         target = self.target
         if node.tool_type == ToolType.INPUT:
             raw = node.table_name or node.tool_id
-            table = _source_table(raw, target)
+            table = _source_table(raw, target, node.tool_id)
             return ReadStep(id=node.tool_id, source_table=table, alias=table.rsplit(".", 1)[-1])
 
         if node.tool_type == ToolType.SELECT:
@@ -263,13 +283,23 @@ class _Converter:
             )
 
         if node.tool_type == ToolType.APPEND_FIELDS:
+            # Alteryx's actual destination-connection labels for this tool are
+            # "Source" (the base/many-row stream) and "Targets" — plural, easy
+            # to miss — for the single-row stream being appended onto it.
             labels = node.upstream_labels
-            target_id = labels.get("Targe") or labels.get("Target") or (
-                node.upstream_ids[0] if node.upstream_ids else node.tool_id
-            )
-            source_id = labels.get("Source") or (
-                node.upstream_ids[1] if len(node.upstream_ids) > 1 else target_id
-            )
+            target_id = labels.get("Source")
+            source_id = labels.get("Targets")
+            if target_id is None or source_id is None:
+                # Labels missing (older export?): fall back to positional
+                # order, but never let both sides collide onto the same
+                # node — that would silently render as a self cross-join
+                # (every row paired with every row) instead of the intended
+                # append, corrupting the row count without any error.
+                ids = node.upstream_ids
+                target_id = target_id or (ids[0] if ids else node.tool_id)
+                source_id = source_id or next(
+                    (uid for uid in ids if uid != target_id), target_id
+                )
             return AppendFieldsStep(
                 id=node.tool_id, target=self._resolve(target_id), source=self._resolve(source_id)
             )

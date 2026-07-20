@@ -459,13 +459,29 @@ def render_sdp(spec: PipelineSpec) -> str:
         parts.append(_CLEANSE_UTILITY)
     parts.extend(_render_macro_utilities(spec))
 
-    # Bronze: raw landing, one table per source.
-    bronze_names: dict[str, str] = {}
+    # Bronze: raw landing, one table per unique source. `@dp.table` names must
+    # be unique in the pipeline, so two ReadSteps of the identical
+    # source_table (a workflow can have more than one Input tool pointing at
+    # the same table) are merged onto one bronze table instead of emitting
+    # a duplicate definition, which Lakeflow would reject at deploy time.
+    # Two *different* tables whose sanitized names collide get a numeric
+    # suffix so they stay distinct.
+    bronze_names: dict[str, str] = {}  # read.id -> emitted bronze table name
+    bronze_by_source: dict[str, str] = {}  # source_table -> emitted bronze table name
+    used_bronze_names: set[str] = set()
     for read in reads:
-        bronze = f"bronze_{_sdp_table_name(read.alias)}"
-        bronze_names[read.id] = bronze
+        if read.source_table in bronze_by_source:
+            bronze_names[read.id] = bronze_by_source[read.source_table]
+            continue
+        base = f"bronze_{_sdp_table_name(read.alias)}"
+        name, n = base, 2
+        while name in used_bronze_names:
+            name, n = f"{base}_{n}", n + 1
+        used_bronze_names.add(name)
+        bronze_by_source[read.source_table] = name
+        bronze_names[read.id] = name
         parts.append(
-            _dp_table(bronze, f"Raw landing of {read.source_table}",
+            _dp_table(name, f"Raw landing of {read.source_table}",
                       [f'return spark.read.table("{read.source_table}")'])
         )
 
@@ -479,10 +495,24 @@ def render_sdp(spec: PipelineSpec) -> str:
     silver_body.append(f"return {_var(silver_last)}")
     parts.append(_dp_table(silver, f"Transformed data for {spec.name}", silver_body))
 
-    # Gold: business-level aggregates per output table.
+    # Gold: business-level aggregates per output table. Unlike bronze reads,
+    # two WriteSteps landing on the same sanitized name are NOT safe to
+    # merge — they're distinct transform bodies that happen to collide
+    # after sanitization, and silently dropping one would lose an entire
+    # output. Disambiguate with a suffix and flag it for human review.
     gold_ids = {s.id for s in gold_steps}
+    used_gold_names: dict[str, int] = {}
     for write in writes:
-        gold = f"gold_{_sdp_table_name(write.target_table)}"
+        base = f"gold_{_sdp_table_name(write.target_table)}"
+        seen = used_gold_names.get(base, 0)
+        used_gold_names[base] = seen + 1
+        gold = base if seen == 0 else f"{base}_{seen + 1}"
+        comment = f"Business-level output {write.target_table}"
+        if seen:
+            comment += (
+                " -- REVIEW: name collided with another write step after "
+                "sanitization; confirm these are genuinely different outputs"
+            )
         body: list[str] = []
         referenced: set[str] = set()
         for step in gold_steps:
@@ -498,6 +528,6 @@ def render_sdp(spec: PipelineSpec) -> str:
             body.append(f"return {_var(final)}")
         else:
             body.append(f'return spark.read.table("{silver}")')
-        parts.append(_dp_table(gold, f"Business-level output {write.target_table}", body))
+        parts.append(_dp_table(gold, comment, body))
 
     return "\n".join(parts) + "\n"
