@@ -43,6 +43,7 @@ from deploy.dbsql import (
     validation_report,
 )
 from deploy.export import deploy_bundle, export_bundle_from_spec, run_bundle_job
+from deploy.gitops import GitError, commit_and_push, repo_info, set_remote
 from ingest.alteryx.parser import parse_yxmd
 from knowledge.alteryx_tools import lookup_by_plugin
 from llm.client import AnthropicLLMClient
@@ -152,6 +153,35 @@ with st.sidebar:
         st.caption("Registered: " + ", ".join(known_macros))
 
     st.divider()
+    st.header("Git repository")
+    st.caption(
+        "Version every deployed bundle in git. The bundle folder is committed and "
+        "pushed here as part of Migrate & deploy."
+    )
+    _git_state = repo_info(_ROOT)
+    if _git_state["is_repo"]:
+        st.caption(
+            f"Current: `{_git_state['remote_url'] or '(no remote)'}` on branch "
+            f"`{_git_state['branch']}`"
+        )
+    else:
+        st.caption("This project folder is not a git repository yet.")
+    git_enabled = st.checkbox("Commit & push bundle on deploy", value=bool(_git_state["is_repo"]))
+    git_remote_url = st.text_input(
+        "Repository URL (leave blank to keep current remote)",
+        value="",
+        placeholder="https://github.com/you/your-repo.git",
+    )
+    git_branch = st.text_input(
+        "Branch", value=str(_git_state["branch"] or "main")
+    )
+    git_token = st.text_input(
+        "GitHub token (optional, for push auth)", type="password",
+        help="Used only for a single push, never stored. Leave blank to use your "
+        "existing git credentials.",
+    )
+
+    st.divider()
     st.header("2. Target defaults")
     catalog = st.text_input("Catalog", value=TARGET_DEFAULTS.catalog)
     schema_name = st.text_input("Schema", value=TARGET_DEFAULTS.schema_name)
@@ -179,6 +209,31 @@ FORMAT_LABELS: dict[ArtifactFormat, str] = {
     "sdp": "SDP / Declarative Pipeline (medallion)",
 }
 FORMAT_ORDER: list[ArtifactFormat] = ["job", "notebook", "sdp"]
+
+
+def _push_bundle_to_git(bundle_dir: Path, workflow_name: str) -> None:
+    """Commit and push a generated bundle dir if git integration is enabled."""
+    if not git_enabled:
+        return
+    if git_remote_url.strip():
+        try:
+            set_remote(_ROOT, git_remote_url.strip())
+        except GitError as exc:
+            st.warning(f"Could not set git remote: {exc}")
+            return
+    try:
+        rel = str(bundle_dir.relative_to(_ROOT))
+    except ValueError:
+        rel = str(bundle_dir)
+    ok, log = commit_and_push(
+        _ROOT,
+        [rel],
+        f"Add migrated Databricks bundle for {workflow_name}",
+        git_branch.strip() or "main",
+        token=git_token or None,
+    )
+    (st.success if ok else st.error)("Git: " + log)
+
 
 tab_quick, tab_repo, tab_convert, tab_code, tab_parity, tab_deploy = st.tabs(
     [
@@ -273,6 +328,7 @@ with tab_quick:
                 for line in url_lines:
                     st.success(f"Job created — {line}")
                 st.session_state["quick_last_bundle"] = str(quick_dir)
+                _push_bundle_to_git(quick_dir, wf_name)
                 if workflow.unsupported:
                     with st.expander(
                         f"{len(workflow.unsupported)} tool(s) need manual follow-up"
@@ -698,10 +754,8 @@ with tab_deploy:
                         ok, log = deploy_bundle(bundle_dir, deploy_host, token)
                     st.code(log)
                     if ok:
-                        st.success(
-                            f"Deployed. Bundle written to `bundles/{safe_name}/` — commit it to git "
-                            "to keep the workflow versioned."
-                        )
+                        st.success(f"Deployed. Bundle written to `bundles/{safe_name}/`.")
+                        _push_bundle_to_git(bundle_dir, selected)
                     else:
                         st.error("Deploy failed — see the CLI output above.")
 

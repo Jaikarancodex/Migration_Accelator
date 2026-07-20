@@ -33,6 +33,7 @@ from app.offline_convert import naive_spec_from_workflow
 from convert.renderer import render_databricks_notebook, render_pyspark, render_sdp
 from convert.spec import PipelineSpec, TargetRef
 from deploy.dab import ArtifactFormat, single_target_bundle, write_databricks_yml
+from deploy.models import dab_identifier
 from ingest.alteryx.parser import parse_yxmd
 
 _RENDERERS = {
@@ -59,15 +60,18 @@ def export_bundle_from_spec(
         bundle_name = re.sub(r"\W+", "_", spec.name).strip("_").lower()
     code = _RENDERERS[artifact_format](spec)
 
+    # The artifact filename becomes a Databricks workspace path; keep it free
+    # of spaces and other characters that break notebook/file paths.
+    safe_stem = dab_identifier(spec.name)
     out = Path(output_dir)
     src_dir = out / "src"
     src_dir.mkdir(parents=True, exist_ok=True)
-    (src_dir / f"{spec.name}.py").write_text(code, encoding="utf-8")
+    (src_dir / f"{safe_stem}.py").write_text(code, encoding="utf-8")
 
     bundle = single_target_bundle(
         bundle_name=bundle_name,
         pipeline_name=spec.name,
-        python_file=f"./src/{spec.name}.py",
+        python_file=f"./src/{safe_stem}.py",
         workspace_host=workspace_host,
         catalog=spec.target.catalog,
         schema=spec.target.schema_,

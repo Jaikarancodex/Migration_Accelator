@@ -87,6 +87,47 @@ def test_sdp_format_emits_pipeline_resource_and_no_job() -> None:
     assert pipeline["libraries"] == [{"file": {"path": "./pipelines/sales_summary.py"}}]
 
 
+def test_space_containing_workflow_name_yields_valid_resource_keys() -> None:
+    import re
+
+    bundle = single_target_bundle(
+        bundle_name="alteryx_use_case_workflow",
+        pipeline_name="Alteryx Use Case Workflow",
+        python_file="./src/Alteryx_Use_Case_Workflow.py",
+        workspace_host="https://community.cloud.databricks.com",
+        catalog="workspace",
+        schema="default",
+        artifact_format="notebook",
+    )
+    doc = yaml.safe_load(build_databricks_yml(bundle))
+
+    (job_key,) = doc["resources"]["jobs"].keys()
+    # Terraform resource-name rule: start with letter/underscore, then
+    # letters/digits/underscores/dashes only.
+    assert re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", job_key), job_key
+    task_key = doc["resources"]["jobs"][job_key]["tasks"][0]["task_key"]
+    assert re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", task_key), task_key
+    # the display name keeps the original spaces
+    assert doc["resources"]["jobs"][job_key]["name"] == "Alteryx Use Case Workflow_job"
+
+
+def test_sdp_space_containing_name_yields_valid_pipeline_key() -> None:
+    import re
+
+    bundle = single_target_bundle(
+        bundle_name="wf",
+        pipeline_name="My Fancy Workflow",
+        python_file="./src/My_Fancy_Workflow.py",
+        workspace_host="https://community.cloud.databricks.com",
+        catalog="workspace",
+        schema="default",
+        artifact_format="sdp",
+    )
+    doc = yaml.safe_load(build_databricks_yml(bundle))
+    (pipe_key,) = doc["resources"]["pipelines"].keys()
+    assert re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", pipe_key), pipe_key
+
+
 def test_single_target_bundle_has_exactly_one_development_target() -> None:
     bundle = single_target_bundle(
         bundle_name="migration-accelerator",

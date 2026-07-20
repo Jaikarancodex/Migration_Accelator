@@ -7,11 +7,28 @@ more of it is needed.
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 DABMode = Literal["development", "production"]
+
+
+def dab_identifier(name: str) -> str:
+    """Sanitize a name into a valid Terraform/Databricks resource identifier.
+
+    Terraform resource names (and job/pipeline resource keys and task keys)
+    must start with a letter or underscore and contain only letters, digits,
+    underscores, and dashes — so a workflow named "Alteryx Use Case Workflow"
+    cannot be used as a resource key verbatim.
+    """
+    ident = re.sub(r"[^A-Za-z0-9_-]+", "_", name).strip("_-")
+    if not ident:
+        return "workflow"
+    if not re.match(r"[A-Za-z_]", ident):
+        ident = f"_{ident}"
+    return ident
 
 
 class DABTarget(BaseModel):
@@ -39,20 +56,34 @@ class DABTask(BaseModel):
 
 
 class DABJob(BaseModel):
-    name: str
+    name: str  # human-readable display name (may contain spaces)
     tasks: list[DABTask]
+    key: str | None = None  # Terraform resource key; auto-derived from name if unset
+
+    @model_validator(mode="after")
+    def _default_key(self) -> DABJob:
+        if self.key is None:
+            self.key = dab_identifier(self.name)
+        return self
 
 
 class DABPipeline(BaseModel):
     """A Lakeflow/Spark Declarative Pipeline resource (for SDP-rendered specs)."""
 
-    name: str
+    name: str  # human-readable display name (may contain spaces)
     catalog: str
     schema_: str = Field(alias="schema")
     library_path: str
     serverless: bool = True
+    key: str | None = None  # Terraform resource key; auto-derived from name if unset
 
     model_config = {"populate_by_name": True}
+
+    @model_validator(mode="after")
+    def _default_key(self) -> DABPipeline:
+        if self.key is None:
+            self.key = dab_identifier(self.name)
+        return self
 
 
 class DABBundle(BaseModel):

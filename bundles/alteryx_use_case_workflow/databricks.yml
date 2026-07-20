@@ -1,0 +1,25 @@
+bundle:
+  name: alteryx_use_case_workflow
+variables:
+  catalog:
+    description: Target catalog
+    default: workspace
+  schema:
+    description: Target schema
+    default: default
+resources:
+  jobs:
+    Alteryx_Use_Case_Workflow_job:
+      name: Alteryx Use Case Workflow_job
+      tasks:
+      - task_key: Alteryx_Use_Case_Workflow
+        notebook_task:
+          notebook_path: ./src/Alteryx_Use_Case_Workflow.py
+targets:
+  default:
+    mode: development
+    workspace:
+      host: https://dbc-922a9e09-b3e2.cloud.databricks.com
+    variables:
+      catalog: workspace
+      schema: default

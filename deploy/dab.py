@@ -37,14 +37,14 @@ def build_databricks_yml(bundle: DABBundle) -> str:
     resources: dict[str, Any] = {}
     if bundle.job is not None:
         resources["jobs"] = {
-            bundle.job.name: {
+            bundle.job.key: {
                 "name": bundle.job.name,
                 "tasks": [_task_doc(task) for task in bundle.job.tasks],
             }
         }
     if bundle.pipeline is not None:
         resources["pipelines"] = {
-            bundle.pipeline.name: {
+            bundle.pipeline.key: {
                 "name": bundle.pipeline.name,
                 "catalog": bundle.pipeline.catalog,
                 "schema": bundle.pipeline.schema_,
@@ -89,7 +89,11 @@ def _bundle_resources(
     schema: str,
 ) -> dict[str, Any]:
     """Build the job/pipeline kwargs for a DABBundle from the chosen artifact format."""
-    from deploy.models import DABJob, DABPipeline, DABTask
+    from deploy.models import DABJob, DABPipeline, DABTask, dab_identifier
+
+    # task_key and resource keys must be valid identifiers; the display name
+    # keeps the original (possibly space-containing) workflow name.
+    task_key = dab_identifier(pipeline_name)
 
     if artifact_format == "sdp":
         return {
@@ -101,9 +105,9 @@ def _bundle_resources(
             )
         }
     task = (
-        DABTask(task_key=pipeline_name, notebook_path=artifact_path)
+        DABTask(task_key=task_key, notebook_path=artifact_path)
         if artifact_format == "notebook"
-        else DABTask(task_key=pipeline_name, python_file=artifact_path)
+        else DABTask(task_key=task_key, python_file=artifact_path)
     )
     return {"job": DABJob(name=f"{pipeline_name}_job", tasks=[task])}
 
