@@ -28,7 +28,13 @@ import streamlit as st
 import yaml
 from pydantic import ValidationError
 
-from app.flow_ui import Status, pipeline_flow_html, workflow_canvas_html
+from app.flow_ui import (
+    Status,
+    hero_html,
+    pipeline_flow_html,
+    stepper_html,
+    workflow_canvas_html,
+)
 from app.offline_convert import naive_spec_from_workflow
 from configs.loader import load_yaml_config
 from configs.models import DeployDefaultsConfig, TargetDefaultsConfig
@@ -99,9 +105,13 @@ def _ingest_files(uploaded_files: list[Any]) -> list[str]:
     return ingested
 
 
-st.title("Migration Accelerator — Review Console")
-st.caption(
-    "Alteryx (.yxmd) -> validated YAML spec -> deterministic PySpark -> parity preview -> Databricks Asset Bundle."
+st.markdown(
+    hero_html(
+        "Migration Accelerator",
+        "Turn Alteryx workflows into deployed, version-controlled Databricks pipelines — "
+        "guided, one step at a time.",
+    ),
+    unsafe_allow_html=True,
 )
 
 with st.sidebar:
@@ -238,163 +248,285 @@ def _push_bundle_to_git(bundle_dir: Path, workflow_name: str) -> None:
 
 tab_quick, tab_repo, tab_convert, tab_code, tab_parity, tab_deploy = st.tabs(
     [
-        "Quick migrate",
-        "Repo & dependency graph",
-        "Convert",
-        "Generated code",
+        "Guided migration",
+        "Repo & flow",
+        "Convert (advanced)",
+        "Generated code (advanced)",
         "Verify parity",
-        "Deploy",
+        "Deploy (advanced)",
     ]
 )
 
 with tab_quick:
-    st.markdown(
-        "#### Migrate an Alteryx workflow to Databricks in one step\n"
-        "1. Upload your `.yxmd` file &nbsp;→&nbsp; 2. Click **Migrate & deploy** &nbsp;→&nbsp; "
-        "3. Open the job in your workspace.\n\n"
-        "The app parses the workflow, converts it, picks the best deployment format, "
-        "and deploys it. Use the other tabs only when you want to review or fine-tune."
-    )
-    quick_file = st.file_uploader("Alteryx workflow (.yxmd)", type=["yxmd"], key="quick_upload")
-    qc1, qc2 = st.columns(2)
-    quick_host = qc1.text_input(
-        "Databricks workspace URL",
-        value="https://dbc-922a9e09-b3e2.cloud.databricks.com",
-        key="quick_host",
-    )
-    quick_env_token = os.environ.get("DATABRICKS_TOKEN", "")
-    quick_token = quick_env_token or qc2.text_input(
-        "Access token", type="password", key="quick_token",
-        help="Databricks: Settings > Developer > Access tokens. Never stored.",
-    )
-    if quick_env_token:
-        qc2.caption("Token found in environment — no need to paste one.")
+    WIZ_LABELS = ["Upload", "Convert", "Format", "Deploy", "Verify"]
+    st.session_state.setdefault("wiz_step", 0)
 
-    if st.button("Migrate & deploy", type="primary", key="quick_go"):
-        if quick_file is None:
-            st.error("Upload a .yxmd file first.")
-        elif not quick_token:
-            st.error("An access token is required to deploy.")
+    def _wiz_reset_from(step: int) -> None:
+        """Invalidate later-step results when an earlier step changes."""
+        if step <= 0:
+            st.session_state.pop("wiz_spec", None)
+            st.session_state.pop("wiz_spec_yaml", None)
+        if step <= 1:
+            st.session_state.pop("wiz_format", None)
+        if step <= 2:
+            st.session_state.pop("wiz_deployed", None)
+
+    _done = [
+        st.session_state.get("wiz_wf") is not None,
+        st.session_state.get("wiz_spec") is not None,
+        st.session_state.get("wiz_format") is not None,
+        bool(st.session_state.get("wiz_deployed")),
+    ]
+    _completed = 0
+    for flag in _done:
+        if flag:
+            _completed += 1
         else:
-            # n8n-style live pipeline: stages light up as each runs.
-            stage_defs = [
-                ("Parse", "\U0001f4c4"),
-                ("Convert", "\U0001f504"),
-                ("Recommend", "\U0001f9e0"),
-                ("Bundle", "\U0001f4e6"),
-                ("Deploy", "\U0001f680"),
-            ]
-            statuses: list[Status] = ["pending"] * len(stage_defs)
-            flow_ph = st.empty()
-            canvas_ph = st.empty()
+            break
+    step = int(st.session_state["wiz_step"])
+    st.markdown(stepper_html(WIZ_LABELS, step, _completed), unsafe_allow_html=True)
 
-            def _render_flow() -> None:
-                stages = [(n, i, s) for (n, i), s in zip(stage_defs, statuses, strict=False)]
-                flow_ph.markdown(pipeline_flow_html(stages), unsafe_allow_html=True)
+    gate_ok = False
 
-            def _set(index: int, status: Status) -> None:
-                statuses[index] = status
-                _render_flow()
+    # ---- Step 0: Upload -------------------------------------------------
+    if step == 0:
+        with st.container(border=True):
+            st.markdown("#### Step 1 — Upload your Alteryx workflow")
+            st.caption(
+                "Upload a `.yxmd` file. Macros it references (`.yxmc`) can be registered "
+                "in the sidebar so they convert into utilities."
+            )
+            wiz_file = st.file_uploader(".yxmd workflow", type=["yxmd"], key="wiz_upload")
+            if st.button("Parse workflow", type="primary", key="wiz_parse"):
+                if wiz_file is None:
+                    st.error("Choose a .yxmd file first.")
+                else:
+                    names = _ingest_files([wiz_file])
+                    if names:
+                        st.session_state["wiz_wf"] = names[0]
+                        _wiz_reset_from(0)
+                        st.rerun()
 
-            _render_flow()
-            try:
-                _set(0, "running")
-                names = _ingest_files([quick_file])
-                if not names:
-                    _set(0, "error")
-                    st.stop()
-                wf_name = names[0]
+            wf_name = st.session_state.get("wiz_wf")
+            if wf_name:
                 workflow = _repo().read_workflow(wf_name)
-                _set(0, "done")
-                canvas_ph.markdown(workflow_canvas_html(workflow), unsafe_allow_html=True)
-                st.caption(
-                    f"Parsed **{wf_name}** — {len(workflow.nodes)} tools converted, "
+                st.success(
+                    f"Parsed **{wf_name}** — {len(workflow.nodes)} tools ready, "
                     f"{len(workflow.unsupported)} need manual follow-up."
                 )
-                missing_macros = [
+                st.markdown(workflow_canvas_html(workflow), unsafe_allow_html=True)
+                missing = [
                     m for m in workflow.referenced_macros()
                     if m not in _repo().list_macro_names()
                 ]
-                if missing_macros:
+                if missing:
                     st.warning(
-                        "This workflow uses macros that are not registered yet: "
-                        + ", ".join(f"{m}.yxmc" for m in missing_macros)
-                        + ". They will be bridged over — upload the .yxmc files in the "
-                        "sidebar's Macros section and migrate again to convert them fully."
+                        "Unregistered macros: " + ", ".join(f"{m}.yxmc" for m in missing)
+                        + " — upload them in the sidebar to convert them fully."
                     )
+                gate_ok = True
 
-                _set(1, "running")
-                quick_target = TargetRef(catalog="workspace", schema="default", layer="bronze")
+    # ---- Step 1: Convert ------------------------------------------------
+    elif step == 1:
+        with st.container(border=True):
+            st.markdown("#### Step 2 — Convert to a Databricks pipeline")
+            workflow = _repo().read_workflow(st.session_state["wiz_wf"])
+            c1, c2 = st.columns(2)
+            wiz_catalog = c1.text_input("Target catalog", value="workspace", key="wiz_catalog")
+            wiz_schema = c2.text_input("Target schema", value="default", key="wiz_schema")
+            st.caption(
+                "The converter maps every tool to Spark logic and points reads/writes at "
+                f"`{wiz_catalog}.{wiz_schema}.*`. "
+                + ("Using the Anthropic LLM." if has_key else "Using the offline rule-based converter.")
+            )
+            if st.button("Convert workflow", type="primary", key="wiz_convert"):
+                wiz_target = TargetRef(catalog=wiz_catalog, schema=wiz_schema, layer="bronze")
                 if has_key:
-                    quick_spec = generate_pipeline_spec(AnthropicLLMClient(), workflow, quick_target)
+                    spec = generate_pipeline_spec(AnthropicLLMClient(), workflow, wiz_target)
                 else:
-                    quick_spec = naive_spec_from_workflow(
-                        workflow, quick_target, macros=_repo().all_macros()
+                    spec = naive_spec_from_workflow(
+                        workflow, wiz_target, macros=_repo().all_macros()
                     )
-                _set(1, "done")
+                st.session_state["wiz_spec"] = spec
+                st.session_state["wiz_spec_yaml"] = _spec_to_yaml(spec)
+                _wiz_reset_from(1)
+                st.rerun()
 
-                _set(2, "running")
-                rec = (
+            stored_spec = cast("PipelineSpec | None", st.session_state.get("wiz_spec"))
+            if stored_spec is not None:
+                st.success(
+                    f"Converted into {len(stored_spec.steps)} pipeline steps"
+                    + (
+                        f" and {len(stored_spec.macros)} macro utilit(ies)."
+                        if stored_spec.macros else "."
+                    )
+                )
+                with st.expander("Review / edit the pipeline spec (YAML)"):
+                    edited = st.text_area(
+                        "spec", value=st.session_state["wiz_spec_yaml"], height=320,
+                        label_visibility="collapsed",
+                    )
+                    if st.button("Apply edits", key="wiz_apply"):
+                        try:
+                            revalidated = PipelineSpec.model_validate(yaml.safe_load(edited))
+                            st.session_state["wiz_spec"] = revalidated
+                            st.session_state["wiz_spec_yaml"] = edited
+                            st.success("Spec updated.")
+                        except (yaml.YAMLError, ValidationError) as exc:
+                            st.error(f"Invalid spec: {exc}")
+                gate_ok = True
+
+    # ---- Step 2: Format -------------------------------------------------
+    elif step == 2:
+        with st.container(border=True):
+            st.markdown("#### Step 3 — Choose the deployment format")
+            workflow = _repo().read_workflow(st.session_state["wiz_wf"])
+            spec = st.session_state["wiz_spec"]
+            if st.button("Recommend a format", key="wiz_reco"):
+                st.session_state["wiz_rec"] = (
                     recommend_deployment_format(AnthropicLLMClient(), workflow)
                     if has_key else heuristic_recommendation(workflow)
                 )
-                _set(2, "done")
-                st.caption(f"Format: **{FORMAT_LABELS[rec.format]}** — {rec.rationale}")
-
-                _set(3, "running")
-                quick_safe = re.sub(r"\W+", "_", wf_name).strip("_").lower()
-                quick_dir = _ROOT / "bundles" / quick_safe
-                export_bundle_from_spec(
-                    quick_spec, quick_dir, workspace_host=quick_host, artifact_format=rec.format
-                )
-                _set(3, "done")
-
-                _set(4, "running")
-                ok, log = deploy_bundle(quick_dir, quick_host, quick_token)
-                _set(4, "done" if ok else "error")
-            except Exception as exc:  # noqa: BLE001 - surfaced to the user
-                for i, s in enumerate(statuses):
-                    if s == "running":
-                        _set(i, "error")
-                st.error(f"Migration failed: {exc}")
-                st.stop()
-
-            if ok:
-                url_lines = [line.strip() for line in log.splitlines() if "URL:" in line]
-                for line in url_lines:
-                    st.success(f"Job created — {line}")
-                st.session_state["quick_last_bundle"] = str(quick_dir)
-                _push_bundle_to_git(quick_dir, wf_name)
-                if workflow.unsupported:
-                    with st.expander(
-                        f"{len(workflow.unsupported)} tool(s) need manual follow-up"
-                    ):
-                        for u in workflow.unsupported:
-                            m = lookup_by_plugin(u.plugin)
-                            if m is not None:
-                                st.caption(f"**{m.tool}** — {m.databricks_logic}")
-                            else:
-                                st.caption(
-                                    f"[{u.tool_id}] {u.plugin} — likely an embedded macro or "
-                                    "connector; a placeholder todo_source_* table was created "
-                                    "where needed. Land that data, then re-run."
-                                )
-                st.caption(
-                    "Before running the job, make sure its source tables exist in your "
-                    "workspace (the generated code's spark.read/spark.table names)."
-                )
-            else:
-                st.error("Deploy failed — see details below.")
-                st.code(log)
-
-    if st.session_state.get("quick_last_bundle") and st.button(
-        "Run the deployed job now", key="quick_run"
-    ):
-        with st.spinner("Running job (waits for completion)..."):
-            ok, log = run_bundle_job(
-                st.session_state["quick_last_bundle"], quick_host, quick_token
+            rec = st.session_state.get("wiz_rec")
+            if rec is not None:
+                st.info(f"Recommended: **{FORMAT_LABELS[rec.format]}** — {rec.rationale}")
+            default_idx = FORMAT_ORDER.index(rec.format) if rec is not None else 0
+            chosen_label = st.radio(
+                "Format", [FORMAT_LABELS[f] for f in FORMAT_ORDER], index=default_idx,
+                key="wiz_format_radio",
             )
-        (st.success if ok else st.error)(log[-1000:])
+            chosen = next(f for f, label in FORMAT_LABELS.items() if label == chosen_label)
+            st.session_state["wiz_format"] = chosen
+            try:
+                renderer = {
+                    "job": render_pyspark, "notebook": render_databricks_notebook,
+                    "sdp": render_sdp,
+                }[chosen]
+                with st.expander("Preview generated code"):
+                    st.code(renderer(spec), language="python")
+            except ValueError as exc:
+                st.error(str(exc))
+            gate_ok = True
+
+    # ---- Step 3: Deploy -------------------------------------------------
+    elif step == 3:
+        with st.container(border=True):
+            st.markdown("#### Step 4 — Deploy to Databricks")
+            spec = st.session_state["wiz_spec"]
+            fmt = cast(ArtifactFormat, st.session_state["wiz_format"])
+            wiz_host = st.text_input(
+                "Workspace URL", value="https://dbc-922a9e09-b3e2.cloud.databricks.com",
+                key="wiz_host",
+            )
+            wiz_env_token = os.environ.get("DATABRICKS_TOKEN", "")
+            wiz_token = wiz_env_token or st.text_input(
+                "Access token", type="password", key="wiz_token"
+            )
+            if wiz_env_token:
+                st.caption("Using DATABRICKS_TOKEN from the environment.")
+            if git_enabled:
+                st.caption(f"Git: bundle will be committed & pushed to branch `{git_branch}`.")
+
+            if st.button("Deploy now", type="primary", key="wiz_deploy"):
+                if not wiz_token:
+                    st.error("An access token is required.")
+                else:
+                    safe = re.sub(r"\W+", "_", st.session_state["wiz_wf"]).strip("_").lower()
+                    bundle_dir = _ROOT / "bundles" / safe
+                    dstages: list[Status] = ["pending", "pending"]
+                    dph = st.empty()
+
+                    def _dflow() -> None:
+                        dph.markdown(
+                            pipeline_flow_html([
+                                ("Build bundle", "\U0001f4e6", dstages[0]),
+                                ("Deploy", "\U0001f680", dstages[1]),
+                            ]),
+                            unsafe_allow_html=True,
+                        )
+
+                    dstages[0] = "running"
+                    _dflow()
+                    export_bundle_from_spec(spec, bundle_dir, workspace_host=wiz_host, artifact_format=fmt)
+                    dstages[0] = "done"
+                    dstages[1] = "running"
+                    _dflow()
+                    ok, log = deploy_bundle(bundle_dir, wiz_host, wiz_token)
+                    dstages[1] = "done" if ok else "error"
+                    _dflow()
+                    if ok:
+                        st.session_state["wiz_deployed"] = True
+                        st.session_state["wiz_bundle"] = str(bundle_dir)
+                        st.session_state["wiz_host"] = wiz_host
+                        for line in (line.strip() for line in log.splitlines() if "URL:" in line):
+                            st.success(f"Job created — {line}")
+                        _push_bundle_to_git(bundle_dir, st.session_state["wiz_wf"])
+                    else:
+                        st.error("Deploy failed — details below.")
+                        st.code(log)
+
+            if st.session_state.get("wiz_deployed"):
+                st.success("Deployed. Continue to verify the result.")
+                gate_ok = True
+
+    # ---- Step 4: Verify -------------------------------------------------
+    elif step == 4:
+        with st.container(border=True):
+            st.markdown("#### Step 5 — Verify the migration")
+            spec = st.session_state["wiz_spec"]
+            default_table = next(
+                (s.target_table for s in spec.steps if s.op == "write"),
+                f"{spec.target.catalog}.{spec.target.schema_}.output",
+            )
+            wiz_host = st.session_state.get("wiz_host", "https://dbc-922a9e09-b3e2.cloud.databricks.com")
+            wiz_token = os.environ.get("DATABRICKS_TOKEN", "") or st.text_input(
+                "Access token", type="password", key="wiz_verify_token"
+            )
+            table = st.text_input("Migrated output table", value=default_table, key="wiz_vtable")
+            st.caption(
+                "Run the job first (Deploy → Databricks Jobs UI, or the button below), then "
+                "validate. Full row-level parity against an Alteryx export lives in the "
+                "**Verify parity** tab."
+            )
+            vc1, vc2 = st.columns(2)
+            if vc1.button("Run the deployed job", key="wiz_runjob") and st.session_state.get("wiz_bundle"):
+                if not wiz_token:
+                    st.error("Access token required.")
+                else:
+                    with st.spinner("Running job..."):
+                        rok, rlog = run_bundle_job(st.session_state["wiz_bundle"], wiz_host, wiz_token)
+                    (st.success if rok else st.error)(rlog[-800:])
+            if vc2.button("Validate output table", type="primary", key="wiz_validate"):
+                if not wiz_token:
+                    st.error("Access token required.")
+                else:
+                    try:
+                        with st.spinner("Validating..."):
+                            wh = first_warehouse_id(wiz_host, wiz_token)
+                            report = validation_report(wiz_host, wiz_token, wh, table.strip())
+                        if report["passed"]:
+                            st.success(f"Table has {report['row_count']} rows, "
+                                       f"{report['duplicate_rows']} duplicates.")
+                        else:
+                            st.error("Table is empty — did the job run?")
+                        st.write(f"Columns: {len(report['columns'])}")
+                    except SqlError as exc:
+                        st.error(str(exc))
+            st.balloons()
+        gate_ok = True
+
+    # ---- Navigation -----------------------------------------------------
+    st.divider()
+    nav_prev, _, nav_next = st.columns([1, 4, 1])
+    if step > 0 and nav_prev.button("← Back", key="wiz_back"):
+        st.session_state["wiz_step"] = step - 1
+        st.rerun()
+    if step < len(WIZ_LABELS) - 1:
+        if nav_next.button("Continue →", type="primary", disabled=not gate_ok, key="wiz_cont"):
+            st.session_state["wiz_step"] = step + 1
+            st.rerun()
+        if not gate_ok:
+            nav_next.caption("Complete this step")
 
 with tab_repo:
     st.subheader("Migration repo")

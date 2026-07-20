@@ -1,4 +1,18 @@
-from app.flow_ui import pipeline_flow_html, workflow_canvas_html
+from app.flow_ui import hero_html, pipeline_flow_html, stepper_html, workflow_canvas_html
+
+
+def test_stepper_marks_done_current_locked() -> None:
+    html = stepper_html(["Upload", "Convert", "Deploy"], current=1, completed=1)
+    assert html.count("ma-step done") == 1  # step 0
+    assert html.count("ma-step current") == 1  # step 1
+    assert html.count("ma-step locked") == 1  # step 2
+    assert "ma-connect done" in html  # connector into the completed step
+
+
+def test_hero_html_escapes_and_includes_css() -> None:
+    html = hero_html("Title", "Sub <b>tag</b>")
+    assert "ma-hero" in html
+    assert "&lt;b&gt;" in html  # subtitle is escaped
 from ingest.alteryx.ir import Node, ToolType, UnsupportedTool, Workflow
 
 

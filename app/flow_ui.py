@@ -81,6 +81,72 @@ border-radius:11px;background:rgba(127,127,127,0.08);border:1px solid rgba(127,1
 """
 
 
+ACCENT = "#6366f1"
+
+GLOBAL_CSS = f"""
+<style>
+:root {{ --ma-accent: {ACCENT}; }}
+/* Roomier main column, tighter default chrome */
+.block-container {{ padding-top: 2.2rem; max-width: 1150px; }}
+/* Primary buttons in the brand accent */
+.stButton > button[kind="primary"], .stButton > button[data-testid="baseButton-primary"] {{
+  background: var(--ma-accent); border-color: var(--ma-accent);
+}}
+.stButton > button {{ border-radius: 9px; font-weight: 600; }}
+/* Tabs a touch larger and clearer */
+.stTabs [data-baseweb="tab"] {{ font-weight: 600; }}
+.ma-hero {{
+  border-radius: 16px; padding: 22px 26px; margin-bottom: 8px;
+  background: linear-gradient(120deg, rgba(99,102,241,0.16), rgba(99,102,241,0.03));
+  border: 1px solid rgba(99,102,241,0.30);
+}}
+.ma-hero h1 {{ font-size: 1.5rem; margin: 0 0 4px; letter-spacing: -0.01em; }}
+.ma-hero p {{ margin: 0; opacity: 0.78; font-size: 0.95rem; }}
+.ma-pill {{ display:inline-flex; align-items:center; gap:6px; padding:3px 11px; border-radius:999px;
+  font-size:0.76rem; font-weight:600; border:1px solid rgba(127,127,127,0.3); }}
+.ma-steps {{ display:flex; align-items:flex-start; gap:0; padding:16px 2px 6px; font-family:
+  ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }}
+.ma-step {{ display:flex; flex-direction:column; align-items:center; gap:7px; flex:1; min-width:0; }}
+.ma-step .ma-circle {{ width:38px; height:38px; border-radius:50%; display:flex; align-items:center;
+  justify-content:center; font-weight:700; font-size:0.95rem; border:2px solid rgba(127,127,127,0.35);
+  background:rgba(127,127,127,0.06); color:inherit; transition:all .2s ease; }}
+.ma-step .ma-caption {{ font-size:0.78rem; font-weight:600; text-align:center; opacity:0.7; }}
+.ma-step.current .ma-circle {{ border-color:var(--ma-accent); color:var(--ma-accent);
+  box-shadow:0 0 0 4px rgba(99,102,241,0.18); }}
+.ma-step.current .ma-caption {{ opacity:1; color:var(--ma-accent); }}
+.ma-step.done .ma-circle {{ background:var(--ma-accent); border-color:var(--ma-accent); color:#fff; }}
+.ma-step.done .ma-caption {{ opacity:0.95; }}
+.ma-step.locked {{ opacity:0.5; }}
+.ma-connect {{ height:2px; flex:1; margin-top:19px; background:rgba(127,127,127,0.3); align-self:flex-start; }}
+.ma-connect.done {{ background:var(--ma-accent); }}
+</style>
+"""
+
+
+def hero_html(title: str, subtitle: str) -> str:
+    return (
+        GLOBAL_CSS
+        + f'<div class="ma-hero"><h1>{html.escape(title)}</h1>'
+        f"<p>{html.escape(subtitle)}</p></div>"
+    )
+
+
+def stepper_html(labels: list[str], current: int, completed: int) -> str:
+    """Horizontal progress stepper. Steps [0, completed) are done; `current` is active."""
+    parts = [GLOBAL_CSS, '<div class="ma-steps">']
+    for i, label in enumerate(labels):
+        state = "done" if i < completed else ("current" if i == current else "locked")
+        inner = "✓" if state == "done" else str(i + 1)
+        parts.append(
+            f'<div class="ma-step {state}"><div class="ma-circle">{inner}</div>'
+            f'<div class="ma-caption">{html.escape(label)}</div></div>'
+        )
+        if i < len(labels) - 1:
+            parts.append(f'<div class="ma-connect {"done" if i < completed else ""}"></div>')
+    parts.append("</div>")
+    return "".join(parts)
+
+
 def _stage_node(name: str, icon: str, status: Status) -> str:
     color = _STATUS_COLOR[status]
     sub = {"pending": "waiting", "running": "running…", "done": "done", "error": "failed"}[status]
