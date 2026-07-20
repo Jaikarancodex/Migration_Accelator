@@ -51,6 +51,7 @@ from deploy.dbsql import (
 )
 from deploy.export import deploy_bundle, export_bundle_from_spec, run_bundle_job
 from deploy.gitops import GitError, commit_and_push, repo_info, set_remote
+from ingest.alteryx.ir import ToolType
 from ingest.alteryx.parser import parse_yxmd
 from knowledge.alteryx_tools import lookup_by_plugin
 from llm.client import AnthropicLLMClient
@@ -529,34 +530,53 @@ with tab_quick:
             nav_next.caption("Complete this step")
 
 with tab_repo:
-    st.subheader("Migration repo")
+    st.subheader("📊 Migration repo & flow")
     if not object_names:
         st.info("No objects ingested yet — use the sidebar to parse a workflow.")
     else:
         metadatas = repo.list_metadata()
-        st.dataframe(
-            [
-                {
-                    "name": m.name,
-                    "source_system": m.source_system,
-                    "input_tables": ", ".join(m.input_tables),
-                    "output_tables": ", ".join(m.output_tables),
-                    "unsupported_tools": m.unsupported_tool_count,
-                }
-                for m in metadatas
-            ],
-            use_container_width=True,
-        )
 
-        st.markdown("##### Workflow flow")
+        st.markdown("##### 🔀 Workflow flow")
         canvas_obj = st.selectbox("Show flow for", object_names, key="canvas_object")
-        st.markdown(
-            workflow_canvas_html(repo.read_workflow(canvas_obj)), unsafe_allow_html=True
+        canvas_wf = repo.read_workflow(canvas_obj)
+
+        converted = len(canvas_wf.nodes)
+        manual = len(canvas_wf.unsupported)
+        total = converted + manual
+        out_tables = sum(1 for n in canvas_wf.nodes if n.tool_type == ToolType.OUTPUT)
+        macros_used = len(canvas_wf.referenced_macros())
+        t1, t2, t3, t4 = st.columns(4)
+        t1.metric("🧩 Total tools", total)
+        t2.metric(
+            "✅ Auto-converted", converted,
+            delta=f"{round(100 * converted / total)}%" if total else None,
         )
+        t3.metric("⚠️ Manual follow-up", manual)
+        t4.metric("📤 Output tables", out_tables)
+        if macros_used:
+            st.caption(f"🧩 References {macros_used} macro(s): {', '.join(canvas_wf.referenced_macros())}")
+
+        st.markdown(workflow_canvas_html(canvas_wf), unsafe_allow_html=True)
+
+        with st.expander("📋 Repo metadata"):
+            st.dataframe(
+                [
+                    {
+                        "name": m.name,
+                        "source_system": m.source_system,
+                        "input_tables": ", ".join(m.input_tables),
+                        "output_tables": ", ".join(m.output_tables),
+                        "unsupported_tools": m.unsupported_tool_count,
+                    }
+                    for m in metadatas
+                ],
+                use_container_width=True,
+            )
         try:
             graph = DependencyGraph(metadatas)
             order = graph.topological_order()
-            st.write("**Topological conversion order** (dependencies first):")
+            st.markdown("##### 🧭 Topological conversion order")
+            st.caption("Dependencies first — leaf objects convert before the objects that read them.")
             st.code(" -> ".join(order) or "(no objects)")
             if len(order) > 1:
                 dot_lines = ["digraph {"]

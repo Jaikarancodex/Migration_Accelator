@@ -25,24 +25,55 @@ _STATUS_COLOR: dict[Status, str] = {
 
 # Tool-type -> (emoji icon, short label) for the workflow canvas.
 _TOOL_ICON: dict[ToolType, tuple[str, str]] = {
-    ToolType.INPUT: ("\U0001f4e5", "Input"),
-    ToolType.OUTPUT: ("\U0001f4e4", "Output"),
-    ToolType.SELECT: ("\U0001f9ee", "Select"),
-    ToolType.FILTER: ("\U0001f50d", "Filter"),
-    ToolType.FORMULA: ("\U0001f9ee", "Formula"),
-    ToolType.JOIN: ("\U0001f517", "Join"),
-    ToolType.UNION: ("➕", "Union"),
-    ToolType.SORT: ("↕️", "Sort"),
-    ToolType.UNIQUE: ("\U0001f194", "Unique"),
-    ToolType.RECORD_ID: ("\U0001f522", "Record ID"),
-    ToolType.CLEANSE: ("\U0001f9f9", "Cleanse"),
-    ToolType.SUMMARIZE: ("\U0001f4ca", "Summarize"),
-    ToolType.MACRO: ("\U0001f9e9", "Macro"),
+    ToolType.INPUT: ("\U0001f4e5", "Input"),        # inbox tray
+    ToolType.OUTPUT: ("\U0001f4e4", "Output"),       # outbox tray
+    ToolType.SELECT: ("\U0001f5c2️", "Select"),  # card index dividers
+    ToolType.FILTER: ("\U0001f50d", "Filter"),        # magnifier
+    ToolType.FORMULA: ("\U0001f9ee", "Formula"),      # abacus
+    ToolType.JOIN: ("\U0001f517", "Join"),            # link
+    ToolType.UNION: ("\U0001f9f1", "Union"),          # bricks
+    ToolType.SORT: ("\U0001f523", "Sort"),            # symbols
+    ToolType.UNIQUE: ("\U0001f3af", "Unique"),        # target
+    ToolType.RECORD_ID: ("\U0001f522", "Record ID"),  # 1234
+    ToolType.CLEANSE: ("\U0001f9f9", "Cleanse"),      # broom
+    ToolType.SUMMARIZE: ("\U0001f4ca", "Summarize"),  # bar chart
+    ToolType.MACRO: ("\U0001f9e9", "Macro"),          # puzzle
     ToolType.MACRO_INPUT: ("\U0001f4e5", "Macro In"),
     ToolType.MACRO_OUTPUT: ("\U0001f4e4", "Macro Out"),
-    ToolType.PYTHON: ("\U0001f40d", "Python"),
-    ToolType.FIND_REPLACE: ("\U0001f501", "Find/Replace"),
-    ToolType.APPEND_FIELDS: ("\U0001f9f7", "Append"),
+    ToolType.PYTHON: ("\U0001f40d", "Python"),        # snake
+    ToolType.FIND_REPLACE: ("\U0001f501", "Find/Replace"),  # repeat
+    ToolType.APPEND_FIELDS: ("\U0001f9f7", "Append"),  # safety pin
+}
+
+# Tool-type -> palette category, and category -> (accent color, emoji, label).
+_TOOL_CATEGORY: dict[ToolType, str] = {
+    ToolType.INPUT: "input",
+    ToolType.MACRO_INPUT: "input",
+    ToolType.OUTPUT: "output",
+    ToolType.MACRO_OUTPUT: "output",
+    ToolType.SELECT: "prep",
+    ToolType.FILTER: "prep",
+    ToolType.FORMULA: "prep",
+    ToolType.SORT: "prep",
+    ToolType.UNIQUE: "prep",
+    ToolType.RECORD_ID: "prep",
+    ToolType.CLEANSE: "prep",
+    ToolType.JOIN: "join",
+    ToolType.UNION: "join",
+    ToolType.APPEND_FIELDS: "join",
+    ToolType.FIND_REPLACE: "join",
+    ToolType.SUMMARIZE: "transform",
+    ToolType.PYTHON: "dev",
+    ToolType.MACRO: "dev",
+}
+_CATEGORY_META: dict[str, tuple[str, str, str]] = {
+    "input": ("#3b82f6", "\U0001f4e5", "Input"),
+    "output": ("#22c55e", "\U0001f4e4", "Output"),
+    "prep": ("#6366f1", "\U0001f9f0", "Prepare"),
+    "join": ("#f59e0b", "\U0001f517", "Join / Blend"),
+    "transform": ("#14b8a6", "\U0001f4ca", "Transform"),
+    "dev": ("#a855f7", "\U0001f9e9", "Developer"),
+    "manual": ("#ef4444", "⚠️", "Manual"),
 }
 
 _STYLE = """
@@ -69,14 +100,30 @@ position:relative;flex:none;margin:0 2px;}
 .ma-edge::after{content:"";position:absolute;right:-2px;top:-3px;border:4px solid transparent;
 border-left-color:inherit;}
 .ma-edge.done::after{border-left-color:#2ecc71;}
-.ma-canvas{display:flex;flex-wrap:wrap;align-items:center;gap:0;padding:14px 4px;}
-.ma-tnode{display:flex;flex-direction:column;align-items:center;gap:4px;min-width:74px;padding:10px 8px;
-border-radius:11px;background:rgba(127,127,127,0.08);border:1px solid rgba(127,127,127,0.28);}
-.ma-tnode.unsupported{border-style:dashed;border-color:#f5a623;opacity:0.85;}
-.ma-tnode .ma-tico{font-size:20px;}
-.ma-tnode .ma-tlabel{font-size:0.72rem;font-weight:600;text-align:center;line-height:1.05;}
-.ma-tnode .ma-tid{font-size:0.62rem;opacity:0.55;}
-.ma-legend{font-size:0.74rem;opacity:0.7;padding:2px 6px 10px;}
+.ma-canvaswrap{border:1px solid rgba(127,127,127,0.2);border-radius:16px;padding:6px 12px 4px;
+background:linear-gradient(180deg,rgba(127,127,127,0.04),transparent);}
+.ma-canvas{display:flex;flex-wrap:wrap;align-items:center;gap:0;padding:16px 4px;}
+.ma-tnode{position:relative;display:flex;flex-direction:column;align-items:center;gap:5px;
+min-width:96px;padding:13px 11px 9px;border-radius:13px;background:rgba(127,127,127,0.05);
+border:1px solid rgba(127,127,127,0.22);overflow:hidden;
+transition:transform .14s ease,box-shadow .14s ease,border-color .14s ease;}
+.ma-tnode:hover{transform:translateY(-3px);box-shadow:0 8px 20px rgba(0,0,0,0.14);
+border-color:var(--c);}
+.ma-tnode .ma-tbar{position:absolute;top:0;left:0;right:0;height:4px;background:var(--c);}
+.ma-tnode .ma-tico{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;
+justify-content:center;font-size:19px;
+background:color-mix(in srgb, var(--c) 16%, transparent);}
+.ma-tnode .ma-tlabel{font-size:0.74rem;font-weight:700;text-align:center;line-height:1.05;}
+.ma-tnode .ma-tid{font-size:0.6rem;opacity:0.5;font-weight:600;letter-spacing:0.02em;}
+.ma-tnode.unsupported{border-style:dashed;border-color:var(--c);}
+.ma-conn{align-self:center;flex:none;width:26px;height:2px;margin:0 -1px;
+background:rgba(127,127,127,0.38);position:relative;}
+.ma-conn::after{content:"";position:absolute;right:-1px;top:-3px;border:4px solid transparent;
+border-left-color:rgba(127,127,127,0.55);}
+.ma-legend2{display:flex;flex-wrap:wrap;gap:14px;padding:8px 8px 12px;font-size:0.76rem;opacity:0.85;}
+.ma-key{display:inline-flex;align-items:center;gap:6px;font-weight:600;}
+.ma-key i{width:11px;height:11px;border-radius:3px;display:inline-block;}
+.ma-legend{font-size:0.74rem;opacity:0.65;padding:2px 8px 8px;}
 </style>
 """
 
@@ -171,37 +218,58 @@ def pipeline_flow_html(stages: list[tuple[str, str, Status]]) -> str:
     return "".join(parts)
 
 
+def _tool_node_html(icon: str, label: str, tool_id: str, color: str, unsupported: bool) -> str:
+    cls = "ma-tnode unsupported" if unsupported else "ma-tnode"
+    tag = "manual" if unsupported else f"#{html.escape(tool_id)}"
+    return (
+        f'<div class="{cls}" style="--c:{color}"><span class="ma-tbar"></span>'
+        f'<div class="ma-tico">{icon}</div>'
+        f'<div class="ma-tlabel">{html.escape(label)}</div>'
+        f'<div class="ma-tid">{tag}</div></div>'
+    )
+
+
 def workflow_canvas_html(workflow: Workflow, max_nodes: int = 60) -> str:
-    """Render the parsed Alteryx workflow as connected tool nodes (n8n-style)."""
+    """Render the parsed Alteryx workflow as category-colored connected nodes."""
     ordered = workflow.topological_order()
     truncated = len(ordered) > max_nodes
     ordered = ordered[:max_nodes]
 
-    parts = [_STYLE, '<div class="ma-canvas">']
+    parts = [_STYLE, '<div class="ma-canvaswrap"><div class="ma-canvas">']
+    used_categories: set[str] = set()
     for i, node in enumerate(ordered):
         icon, label = _TOOL_ICON.get(node.tool_type, ("⚙️", node.tool_type.value))
-        parts.append(
-            f'<div class="ma-tnode"><div class="ma-tico">{icon}</div>'
-            f'<div class="ma-tlabel">{html.escape(label)}</div>'
-            f'<div class="ma-tid">#{html.escape(node.tool_id)}</div></div>'
-        )
+        category = _TOOL_CATEGORY.get(node.tool_type, "prep")
+        used_categories.add(category)
+        color = _CATEGORY_META[category][0]
+        parts.append(_tool_node_html(icon, label, node.tool_id, color, unsupported=False))
         if i < len(ordered) - 1:
-            parts.append('<div class="ma-edge done"></div>')
-    for u in workflow.unsupported:
-        short = u.plugin.split(".")[-1].split("\\")[-1]
-        parts.append(
-            f'<div class="ma-tnode unsupported"><div class="ma-tico">⚠️</div>'
-            f'<div class="ma-tlabel">{html.escape(short[:12])}</div>'
-            f'<div class="ma-tid">manual</div></div>'
-        )
+            parts.append('<div class="ma-conn"></div>')
+
+    if workflow.unsupported:
+        used_categories.add("manual")
+        manual_color = _CATEGORY_META["manual"][0]
+        if ordered:
+            parts.append('<div class="ma-conn"></div>')
+        for j, u in enumerate(workflow.unsupported):
+            short = u.plugin.split(".")[-1].split("\\")[-1]
+            parts.append(
+                _tool_node_html("⚠️", short[:12], u.tool_id, manual_color, unsupported=True)
+            )
+            if j < len(workflow.unsupported) - 1:
+                parts.append('<div class="ma-conn"></div>')
     parts.append("</div>")
+
+    # Legend keyed to the categories actually present.
+    keys = [
+        f'<span class="ma-key"><i style="background:{color}"></i>{emoji} {label}</span>'
+        for cat, (color, emoji, label) in _CATEGORY_META.items()
+        if cat in used_categories
+    ]
+    parts.append('<div class="ma-legend2">' + "".join(keys) + "</div></div>")
     if truncated:
         parts.append(
             f'<div class="ma-legend">Showing first {max_nodes} of {len(workflow.nodes)} '
             "tools — the full flow deploys regardless.</div>"
         )
-    parts.append(
-        '<div class="ma-legend">Solid = converted automatically &nbsp;·&nbsp; '
-        "Dashed amber = needs manual follow-up (connector / unknown tool).</div>"
-    )
     return "".join(parts)

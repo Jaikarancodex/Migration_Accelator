@@ -1,4 +1,5 @@
 from app.flow_ui import hero_html, pipeline_flow_html, stepper_html, workflow_canvas_html
+from ingest.alteryx.ir import Node, ToolType, UnsupportedTool, Workflow
 
 
 def test_stepper_marks_done_current_locked() -> None:
@@ -13,7 +14,6 @@ def test_hero_html_escapes_and_includes_css() -> None:
     html = hero_html("Title", "Sub <b>tag</b>")
     assert "ma-hero" in html
     assert "&lt;b&gt;" in html  # subtitle is escaped
-from ingest.alteryx.ir import Node, ToolType, UnsupportedTool, Workflow
 
 
 def test_pipeline_flow_marks_status_classes_and_edges() -> None:
@@ -49,6 +49,11 @@ def test_workflow_canvas_renders_tool_nodes_and_unsupported() -> None:
     # unsupported node rendered as dashed/manual (label truncated for layout)
     assert "ma-tnode unsupported" in html
     assert "Sharepoint" in html
+    # category-colored nodes: input=blue, output=green, plus a legend
+    assert "--c:#3b82f6" in html  # input
+    assert "--c:#22c55e" in html  # output
+    assert "ma-legend2" in html
+    assert "ma-tbar" in html
 
 
 def test_workflow_canvas_truncates_large_workflows() -> None:
