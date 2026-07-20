@@ -34,6 +34,15 @@ the YAML in prose or markdown fences.
 {{ tool_knowledge }}
 {% endif %}
 
+{% if past_corrections %}
+## Past human corrections for workflows using similar tools
+A reviewer previously corrected an automated conversion below (diff format:
+`-` is what was generated, `+` is what the reviewer changed it to). Apply the
+same fix if this workflow hits the same pattern.
+
+{{ past_corrections }}
+{% endif %}
+
 ## Target location
 catalog: {{ target_catalog }}
 schema: {{ target_schema }}

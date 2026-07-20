@@ -178,7 +178,8 @@ def test_render_union_sort_distinct_steps() -> None:
     assert 'df_ordered = df_deduped.orderBy(F.col("Region").asc(), F.col("Amount").desc())' in source
 
 
-def test_render_cleanse_emits_inline_utility_in_all_formats() -> None:
+def test_render_cleanse_imports_from_separate_utility_module_in_all_formats() -> None:
+    from convert.renderer import render_utility_module, utils_module_name
     from convert.spec import CleanseStep
 
     spec = PipelineSpec(
@@ -189,20 +190,44 @@ def test_render_cleanse_emits_inline_utility_in_all_formats() -> None:
             WriteStep(id="w", input="c", target_table="main.x.out", mode="overwrite"),
         ],
     )
+    module = utils_module_name(spec)
+    assert module == "cleanse_case_utils"
+
+    util = render_utility_module(spec)
+    assert util is not None
+    compile(util, "<generated>", "exec")
+    assert "def cleanse_columns(" in util
+
     job = render_pyspark(spec)
     compile(job, "<generated>", "exec")
-    assert "def cleanse_columns(" in job
+    assert "def cleanse_columns(" not in job  # no longer inlined
+    assert f"from {module} import cleanse_columns" in job
     assert "df_c = cleanse_columns(df_r, columns=['a'], trim=True, nulls_to_blank=True)" in job
 
     notebook = render_databricks_notebook(spec)
-    assert "def cleanse_columns(" in notebook
+    assert "def cleanse_columns(" not in notebook
+    assert f"from {module} import cleanse_columns" in notebook
 
     sdp = render_sdp(spec)
     compile(sdp, "<generated>", "exec")
-    assert "def cleanse_columns(" in sdp
+    assert "def cleanse_columns(" not in sdp
+    assert f"from {module} import cleanse_columns" in sdp
     # the utility is called from inside the silver layer
     silver = sdp.split('silver_cleanse_case"')[1].split("@dp.table")[0]
     assert "cleanse_columns(" in silver
+
+
+def test_render_utility_module_is_none_when_unused() -> None:
+    from convert.renderer import render_utility_module
+
+    spec = PipelineSpec(
+        name="plain_case", language="pyspark", source=SOURCE, target=TARGET,
+        steps=[
+            ReadStep(id="r", source_table="t", alias="raw"),
+            WriteStep(id="w", input="r", target_table="main.x.out", mode="overwrite"),
+        ],
+    )
+    assert render_utility_module(spec) is None
 
 
 def test_adapt_python_code_rewrites_alteryx_calls() -> None:

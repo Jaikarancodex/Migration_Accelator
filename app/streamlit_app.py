@@ -28,6 +28,7 @@ import streamlit as st
 import yaml
 from pydantic import ValidationError
 
+from app import repo_cache
 from app.flow_ui import (
     ICONS,
     Status,
@@ -39,7 +40,13 @@ from app.flow_ui import (
 from app.offline_convert import naive_spec_from_workflow
 from configs.loader import load_yaml_config
 from configs.models import DeployDefaultsConfig, TargetDefaultsConfig
-from convert.renderer import render_databricks_notebook, render_pyspark, render_sdp
+from convert.renderer import (
+    render_databricks_notebook,
+    render_pyspark,
+    render_sdp,
+    render_utility_module,
+    utils_module_name,
+)
 from convert.spec import MedallionLayer, PipelineSpec, TargetRef
 from deploy.dab import ArtifactFormat, build_databricks_yml, default_bundle, single_target_bundle
 from deploy.dbsql import (
@@ -52,6 +59,7 @@ from deploy.dbsql import (
 )
 from deploy.export import deploy_bundle, export_bundle_from_spec, run_bundle_job
 from deploy.gitops import GitError, commit_and_push, repo_info, set_remote
+from feedback.store import log_conversion_triple
 from ingest.alteryx.ir import ToolType
 from ingest.alteryx.parser import parse_yxmd
 from knowledge.alteryx_tools import lookup_by_plugin
@@ -161,7 +169,7 @@ with st.sidebar:
             registered.append(_repo().write_macro(macro_wf))
         if registered:
             st.success(f"Registered macros: {', '.join(registered)}")
-    known_macros = _repo().list_macro_names()
+    known_macros = repo_cache.list_macro_names(_repo())
     if known_macros:
         st.caption("Registered: " + ", ".join(known_macros))
 
@@ -214,7 +222,7 @@ with st.sidebar:
         st.warning("ANTHROPIC_API_KEY is not set in this environment — falls back to offline mode.")
 
 repo = _repo()
-object_names = repo.list_object_names()
+object_names = repo_cache.list_object_names(repo)
 
 FORMAT_LABELS: dict[ArtifactFormat, str] = {
     "job": "Job script (spark_python_task)",
@@ -222,6 +230,33 @@ FORMAT_LABELS: dict[ArtifactFormat, str] = {
     "sdp": "SDP / Declarative Pipeline (medallion)",
 }
 FORMAT_ORDER: list[ArtifactFormat] = ["job", "notebook", "sdp"]
+
+_ARTIFACT_RENDERERS = {
+    "job": render_pyspark,
+    "notebook": render_databricks_notebook,
+    "sdp": render_sdp,
+}
+
+
+def _render_artifact_preview(spec: PipelineSpec, artifact_format: ArtifactFormat, key: str) -> None:
+    """Show the generated main file, plus its utility file as a second tab if one exists.
+
+    Macro/cleanse helpers render into a separate importable module shared by
+    all three formats — this mirrors that two-file output in the preview so
+    it's not hidden until deploy.
+    """
+    main_code = _ARTIFACT_RENDERERS[artifact_format](spec)
+    utility_code = render_utility_module(spec)
+    if utility_code is None:
+        st.code(main_code, language="python")
+        return
+    module = utils_module_name(spec)
+    tab_main, tab_util = st.tabs([f"{module.rsplit('_utils', 1)[0]} (main)", f"{module}.py"])
+    with tab_main:
+        st.code(main_code, language="python")
+    with tab_util:
+        st.caption("Cleanse/macro helpers — imported by the main file, deployed alongside it.")
+        st.code(utility_code, language="python")
 
 
 def _push_bundle_to_git(bundle_dir: Path, workflow_name: str) -> None:
@@ -311,7 +346,7 @@ with tab_quick:
 
             wf_name = st.session_state.get("wiz_wf")
             if wf_name:
-                workflow = _repo().read_workflow(wf_name)
+                workflow = repo_cache.read_workflow(_repo(), wf_name)
                 st.success(
                     f"Parsed **{wf_name}** — {len(workflow.nodes)} tools ready, "
                     f"{len(workflow.unsupported)} need manual follow-up."
@@ -319,7 +354,7 @@ with tab_quick:
                 st.markdown(workflow_canvas_html(workflow), unsafe_allow_html=True)
                 missing = [
                     m for m in workflow.referenced_macros()
-                    if m not in _repo().list_macro_names()
+                    if m not in repo_cache.list_macro_names(_repo())
                 ]
                 if missing:
                     st.warning(
@@ -332,7 +367,7 @@ with tab_quick:
     elif step == 1:
         with st.container(border=True):
             st.markdown("#### Step 2 — Convert to a Databricks pipeline")
-            workflow = _repo().read_workflow(st.session_state["wiz_wf"])
+            workflow = repo_cache.read_workflow(_repo(), st.session_state["wiz_wf"])
             c1, c2 = st.columns(2)
             wiz_catalog = c1.text_input("Target catalog", value="workspace", key="wiz_catalog")
             wiz_schema = c2.text_input("Target schema", value="default", key="wiz_schema")
@@ -347,10 +382,15 @@ with tab_quick:
                     spec = generate_pipeline_spec(AnthropicLLMClient(), workflow, wiz_target)
                 else:
                     spec = naive_spec_from_workflow(
-                        workflow, wiz_target, macros=_repo().all_macros()
+                        workflow, wiz_target, macros=repo_cache.all_macros(_repo())
                     )
                 st.session_state["wiz_spec"] = spec
-                st.session_state["wiz_spec_yaml"] = _spec_to_yaml(spec)
+                spec_yaml = _spec_to_yaml(spec)
+                st.session_state["wiz_spec_yaml"] = spec_yaml
+                # kept untouched by edits below, so "Apply edits" can diff
+                # the human correction against what was actually generated.
+                st.session_state["wiz_spec_yaml_generated"] = spec_yaml
+                st.session_state["wiz_tool_types"] = [n.tool_type.value for n in workflow.nodes]
                 _wiz_reset_from(1)
                 st.rerun()
 
@@ -373,6 +413,12 @@ with tab_quick:
                             revalidated = PipelineSpec.model_validate(yaml.safe_load(edited))
                             st.session_state["wiz_spec"] = revalidated
                             st.session_state["wiz_spec_yaml"] = edited
+                            log_conversion_triple(
+                                workflow_name=st.session_state["wiz_wf"],
+                                tool_types=st.session_state.get("wiz_tool_types", []),
+                                generated_spec_yaml=st.session_state["wiz_spec_yaml_generated"],
+                                corrected_spec_yaml=edited,
+                            )
                             st.success("Spec updated.")
                         except (yaml.YAMLError, ValidationError) as exc:
                             st.error(f"Invalid spec: {exc}")
@@ -382,7 +428,7 @@ with tab_quick:
     elif step == 2:
         with st.container(border=True):
             st.markdown("#### Step 3 — Choose the deployment format")
-            workflow = _repo().read_workflow(st.session_state["wiz_wf"])
+            workflow = repo_cache.read_workflow(_repo(), st.session_state["wiz_wf"])
             spec = st.session_state["wiz_spec"]
             if st.button("Recommend a format", key="wiz_reco"):
                 st.session_state["wiz_rec"] = (
@@ -400,12 +446,8 @@ with tab_quick:
             chosen = next(f for f, label in FORMAT_LABELS.items() if label == chosen_label)
             st.session_state["wiz_format"] = chosen
             try:
-                renderer = {
-                    "job": render_pyspark, "notebook": render_databricks_notebook,
-                    "sdp": render_sdp,
-                }[chosen]
                 with st.expander("Preview generated code"):
-                    st.code(renderer(spec), language="python")
+                    _render_artifact_preview(spec, chosen, key="wiz_preview")
             except ValueError as exc:
                 st.error(str(exc))
             gate_ok = True
@@ -535,11 +577,11 @@ with tab_repo:
     if not object_names:
         st.info("No objects ingested yet — use the sidebar to parse a workflow.")
     else:
-        metadatas = repo.list_metadata()
+        metadatas = repo_cache.list_metadata(repo)
 
         st.markdown("##### Workflow flow")
         canvas_obj = st.selectbox("Show flow for", object_names, key="canvas_object")
-        canvas_wf = repo.read_workflow(canvas_obj)
+        canvas_wf = repo_cache.read_workflow(repo, canvas_obj)
 
         converted = len(canvas_wf.nodes)
         manual = len(canvas_wf.unsupported)
@@ -596,8 +638,8 @@ with tab_convert:
         st.info("Ingest an object first.")
     else:
         selected = st.selectbox("Object", object_names, key="convert_object")
-        workflow = repo.read_workflow(selected)
-        metadata = repo.read_metadata(selected)
+        workflow = repo_cache.read_workflow(repo, selected)
+        metadata = repo_cache.read_metadata(repo, selected)
 
         if metadata.unsupported_tool_count:
             st.warning(f"{metadata.unsupported_tool_count} tool(s) were not recognized and were skipped:")
@@ -629,8 +671,15 @@ with tab_convert:
                 else:
                     if backend.startswith("Anthropic"):
                         st.toast("No API key — using offline rule-based conversion instead.")
-                    spec = naive_spec_from_workflow(workflow, target, macros=_repo().all_macros())
-                st.session_state[spec_key] = _spec_to_yaml(spec)
+                    spec = naive_spec_from_workflow(workflow, target, macros=repo_cache.all_macros(_repo()))
+                spec_yaml = _spec_to_yaml(spec)
+                st.session_state[spec_key] = spec_yaml
+                # Kept untouched by edits below, so "Validate edits" can diff
+                # the human correction against what was actually generated.
+                st.session_state[f"{spec_key}::generated"] = spec_yaml
+                st.session_state[f"tool_types::{selected}"] = [
+                    n.tool_type.value for n in workflow.nodes
+                ]
                 # A freshly generated spec is already validated — store it so
                 # the Generated code tab (format picker + render) works
                 # immediately; re-validation is only needed after manual edits.
@@ -648,6 +697,14 @@ with tab_convert:
                     data = yaml.safe_load(edited)
                     validated_spec = PipelineSpec.model_validate(data)
                     st.session_state[f"validated_spec::{selected}"] = validated_spec
+                    generated_yaml = st.session_state.get(f"{spec_key}::generated")
+                    if generated_yaml is not None:
+                        log_conversion_triple(
+                            workflow_name=selected,
+                            tool_types=st.session_state.get(f"tool_types::{selected}", []),
+                            generated_spec_yaml=generated_yaml,
+                            corrected_spec_yaml=edited,
+                        )
                     st.success("Spec is valid.")
                 except (yaml.YAMLError, ValidationError) as exc:
                     st.error(f"Validation failed: {exc}")
@@ -672,7 +729,7 @@ with tab_code:
         else:
             rec_key = f"format_rec::{selected}"
             if st.button("Recommend format (LLM)", key=f"recommend::{selected}"):
-                workflow = repo.read_workflow(selected)
+                workflow = repo_cache.read_workflow(repo, selected)
                 try:
                     if has_key:
                         rec = recommend_deployment_format(AnthropicLLMClient(), workflow)
@@ -700,16 +757,20 @@ with tab_code:
             st.session_state[f"artifact_format::{selected}"] = chosen_format
 
             try:
-                if chosen_format == "notebook":
-                    code = render_databricks_notebook(stored_spec)
-                elif chosen_format == "sdp":
-                    code = render_sdp(stored_spec)
-                else:
-                    code = render_pyspark(stored_spec)
-                st.code(code, language="python")
-                st.download_button(
-                    "Download .py", data=code, file_name=f"{selected}.py", mime="text/x-python"
+                _render_artifact_preview(stored_spec, chosen_format, key=f"code::{selected}")
+                code = _ARTIFACT_RENDERERS[chosen_format](stored_spec)
+                dl1, dl2 = st.columns(2)
+                dl1.download_button(
+                    "Download main .py", data=code, file_name=f"{selected}.py",
+                    mime="text/x-python", key=f"dl_main::{selected}",
                 )
+                utility_code = render_utility_module(stored_spec)
+                if utility_code is not None:
+                    dl2.download_button(
+                        "Download utility .py", data=utility_code,
+                        file_name=f"{utils_module_name(stored_spec)}.py",
+                        mime="text/x-python", key=f"dl_util::{selected}",
+                    )
             except ValueError as exc:
                 st.error(str(exc))
 

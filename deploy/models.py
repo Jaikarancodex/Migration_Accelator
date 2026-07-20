@@ -74,6 +74,11 @@ class DABPipeline(BaseModel):
     catalog: str
     schema_: str = Field(alias="schema")
     library_path: str
+    # Additional pipeline source files, e.g. a generated utility module that
+    # library_path's main file imports (macro/cleanse helpers). Lakeflow
+    # pipelines only execute files declared as libraries, so a sibling
+    # helper module must be listed here too, not just deployed alongside.
+    extra_library_paths: list[str] = Field(default_factory=list)
     serverless: bool = True
     key: str | None = None  # Terraform resource key; auto-derived from name if unset
 

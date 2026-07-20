@@ -358,6 +358,53 @@ def _function_imports(spec: PipelineSpec) -> list[str]:
     return sorted(set(imports))
 
 
+def utils_module_name(spec: PipelineSpec) -> str:
+    """Python-importable module name for spec's generated utility file.
+
+    Distinct from deploy/export.py's artifact-filename sanitizer (which
+    permits dashes, valid for Terraform/Databricks resource names but not
+    for a Python module name) — this one only allows [A-Za-z0-9_].
+    """
+    stem = re.sub(r"[^A-Za-z0-9_]+", "_", spec.name).strip("_").lower()
+    return f"{stem or 'workflow'}_utils"
+
+
+def _utility_names(spec: PipelineSpec) -> list[str]:
+    """Names importable from the generated utility module, if any exist."""
+    names = ["cleanse_columns"] if _uses_cleanse(spec) else []
+    names.extend(m.name for m in spec.macros)
+    return names
+
+
+def render_utility_module(spec: PipelineSpec) -> str | None:
+    """Render cleanse/macro helpers as a standalone module, or None if unused.
+
+    Kept separate from the main artifact so job/notebook/SDP all share one
+    utility file per workflow instead of duplicating (and re-diffing) the
+    same generated functions inline in every format.
+    """
+    if not _uses_cleanse(spec) and not spec.macros:
+        return None
+    parts = [
+        f'"""Generated utility functions for {spec.name!r} '
+        "(convert/renderer.py:render_utility_module).\n\n"
+        "Imported by the main pipeline file — not meant to be run directly.\n"
+        'DO NOT EDIT BY HAND — regenerate from the YAML spec instead.\n"""',
+        "\nfrom pyspark.sql import functions as F  # noqa: N812",
+    ]
+    if _uses_cleanse(spec):
+        parts.append(_CLEANSE_UTILITY)
+    parts.extend(_render_macro_utilities(spec))
+    return "\n".join(parts) + "\n"
+
+
+def _utility_import_line(spec: PipelineSpec) -> str | None:
+    names = _utility_names(spec)
+    if not names:
+        return None
+    return f"from {utils_module_name(spec)} import {', '.join(names)}"
+
+
 def render_pyspark(spec: PipelineSpec) -> str:
     """Render a validated PySpark PipelineSpec into a runnable module source string."""
     if spec.language != "pyspark":
@@ -367,9 +414,17 @@ def render_pyspark(spec: PipelineSpec) -> str:
     imports = _function_imports(spec)
     if imports:
         parts.append("\n".join(imports))
-    if _uses_cleanse(spec):
-        parts.append(_CLEANSE_UTILITY)
-    parts.extend(_render_macro_utilities(spec))
+    # A Databricks spark_python_task runs this as a plain script, so unlike
+    # notebooks/pipeline library files, the deploy directory isn't guaranteed
+    # on sys.path automatically — add it explicitly before importing the
+    # sibling utility module.
+    utility_import = _utility_import_line(spec)
+    if utility_import:
+        parts.append(
+            "import os\nimport sys\n"
+            "sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n"
+            f"{utility_import}"
+        )
     parts.append("\n\ndef run(spark) -> None:  # noqa: ANN001")
     body_lines = [_render_step(step) for step in spec.steps]
     indented = "\n".join("    " + line.replace("\n", "\n    ") for line in body_lines)
@@ -393,10 +448,13 @@ def render_databricks_notebook(spec: PipelineSpec) -> str:
         raise ValueError(f"render_databricks_notebook called with a {spec.language!r} spec")
 
     imports = ["from pyspark.sql import functions as F  # noqa: N812", *_function_imports(spec)]
+    utility_import = _utility_import_line(spec)
+    if utility_import:
+        # Databricks automatically adds a running notebook's own directory to
+        # sys.path, so the sibling utility module (deployed alongside this
+        # notebook) is importable directly with no path manipulation.
+        imports.append(utility_import)
     cells = ["\n".join(imports)]
-    if _uses_cleanse(spec):
-        cells.append(_CLEANSE_UTILITY.strip())
-    cells.extend(part.strip() for part in _render_macro_utilities(spec))
     cells.extend(_render_step(step) for step in spec.steps)
 
     header = (
@@ -455,9 +513,12 @@ def render_sdp(spec: PipelineSpec) -> str:
     imports = _function_imports(spec)
     if imports:
         parts.append("\n".join(imports))
-    if _uses_cleanse(spec):
-        parts.append(_CLEANSE_UTILITY)
-    parts.extend(_render_macro_utilities(spec))
+    utility_import = _utility_import_line(spec)
+    if utility_import:
+        # Lakeflow pipelines add each source file's own directory to
+        # sys.path, so the sibling utility module (deployed as a second
+        # pipeline library alongside this file) is importable directly.
+        parts.append(utility_import)
 
     # Bronze: raw landing, one table per unique source. `@dp.table` names must
     # be unique in the pipeline, so two ReadSteps of the identical

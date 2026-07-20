@@ -49,7 +49,10 @@ def build_databricks_yml(bundle: DABBundle) -> str:
                 "catalog": bundle.pipeline.catalog,
                 "schema": bundle.pipeline.schema_,
                 "serverless": bundle.pipeline.serverless,
-                "libraries": [{"file": {"path": bundle.pipeline.library_path}}],
+                "libraries": [
+                    {"file": {"path": p}}
+                    for p in (bundle.pipeline.library_path, *bundle.pipeline.extra_library_paths)
+                ],
             }
         }
 
@@ -87,8 +90,15 @@ def _bundle_resources(
     artifact_format: ArtifactFormat,
     catalog: str,
     schema: str,
+    extra_artifact_paths: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Build the job/pipeline kwargs for a DABBundle from the chosen artifact format."""
+    """Build the job/pipeline kwargs for a DABBundle from the chosen artifact format.
+
+    `extra_artifact_paths` are additional generated files the main artifact
+    imports (e.g. a macro/cleanse utility module) — for job/notebook these
+    ride along automatically since DAB syncs the whole bundle directory, but
+    SDP pipelines only execute files explicitly declared as libraries.
+    """
     from deploy.models import DABJob, DABPipeline, DABTask, dab_identifier
 
     # task_key and resource keys must be valid identifiers; the display name
@@ -102,6 +112,7 @@ def _bundle_resources(
                 catalog=catalog,
                 schema=schema,
                 library_path=artifact_path,
+                extra_library_paths=extra_artifact_paths or [],
             )
         }
     task = (
@@ -122,13 +133,16 @@ def default_bundle(
     catalog: str,
     schema: str,
     artifact_format: ArtifactFormat = "job",
+    extra_artifact_paths: list[str] | None = None,
 ) -> DABBundle:
     """A minimal, sensible-default bundle: one job or pipeline, three env targets."""
     from deploy.models import DABTarget
 
     return DABBundle(
         bundle_name=bundle_name,
-        **_bundle_resources(pipeline_name, python_file, artifact_format, catalog, schema),
+        **_bundle_resources(
+            pipeline_name, python_file, artifact_format, catalog, schema, extra_artifact_paths
+        ),
         targets={
             "dev": DABTarget(mode="development", workspace_host=dev_host, catalog=catalog, schema=f"{schema}_dev"),
             "staging": DABTarget(
@@ -148,6 +162,7 @@ def single_target_bundle(
     schema: str,
     target_name: str = "default",
     artifact_format: ArtifactFormat = "job",
+    extra_artifact_paths: list[str] | None = None,
 ) -> DABBundle:
     """A one-resource, one-target bundle for a single free-tier workspace.
 
@@ -159,7 +174,9 @@ def single_target_bundle(
 
     return DABBundle(
         bundle_name=bundle_name,
-        **_bundle_resources(pipeline_name, python_file, artifact_format, catalog, schema),
+        **_bundle_resources(
+            pipeline_name, python_file, artifact_format, catalog, schema, extra_artifact_paths
+        ),
         targets={
             target_name: DABTarget(
                 mode="development", workspace_host=workspace_host, catalog=catalog, schema=schema

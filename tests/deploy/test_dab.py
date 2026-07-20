@@ -87,6 +87,25 @@ def test_sdp_format_emits_pipeline_resource_and_no_job() -> None:
     assert pipeline["libraries"] == [{"file": {"path": "./pipelines/sales_summary.py"}}]
 
 
+def test_sdp_includes_utility_module_as_extra_library() -> None:
+    bundle = single_target_bundle(
+        bundle_name="migration-accelerator",
+        pipeline_name="sales_summary",
+        python_file="./src/sales_summary.py",
+        workspace_host="https://community.cloud.databricks.com",
+        catalog="main",
+        schema="migration",
+        artifact_format="sdp",
+        extra_artifact_paths=["./src/sales_summary_utils.py"],
+    )
+    doc = yaml.safe_load(build_databricks_yml(bundle))
+    pipeline = doc["resources"]["pipelines"]["sales_summary_pipeline"]
+    assert pipeline["libraries"] == [
+        {"file": {"path": "./src/sales_summary.py"}},
+        {"file": {"path": "./src/sales_summary_utils.py"}},
+    ]
+
+
 def test_space_containing_workflow_name_yields_valid_resource_keys() -> None:
     import re
 

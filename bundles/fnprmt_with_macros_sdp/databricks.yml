@@ -1,0 +1,29 @@
+bundle:
+  name: fnprmt_prod_neba_bom_info_gcp
+variables:
+  catalog:
+    description: Target catalog
+    default: main
+  schema:
+    description: Target schema
+    default: migration_dev
+resources:
+  pipelines:
+    FNPRMT-PROD-NEBA-BOM-INFO_GCP_pipeline:
+      name: FNPRMT-PROD-NEBA-BOM-INFO_GCP_pipeline
+      catalog: main
+      schema: migration_dev
+      serverless: true
+      libraries:
+      - file:
+          path: ./src/FNPRMT-PROD-NEBA-BOM-INFO_GCP.py
+      - file:
+          path: ./src/fnprmt_prod_neba_bom_info_gcp_utils.py
+targets:
+  default:
+    mode: development
+    workspace:
+      host: https://dbc-922a9e09-b3e2.cloud.databricks.com
+    variables:
+      catalog: main
+      schema: migration_dev

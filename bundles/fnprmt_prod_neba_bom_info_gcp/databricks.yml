@@ -1,0 +1,25 @@
+bundle:
+  name: fnprmt_prod_neba_bom_info_gcp
+variables:
+  catalog:
+    description: Target catalog
+    default: workspace
+  schema:
+    description: Target schema
+    default: default
+resources:
+  jobs:
+    FNPRMT-PROD-NEBA-BOM-INFO_GCP_job:
+      name: FNPRMT-PROD-NEBA-BOM-INFO_GCP_job
+      tasks:
+      - task_key: FNPRMT-PROD-NEBA-BOM-INFO_GCP
+        notebook_task:
+          notebook_path: ./src/FNPRMT-PROD-NEBA-BOM-INFO_GCP.py
+targets:
+  default:
+    mode: development
+    workspace:
+      host: https://dbc-922a9e09-b3e2.cloud.databricks.com
+    variables:
+      catalog: workspace
+      schema: default

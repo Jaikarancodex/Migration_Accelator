@@ -63,6 +63,8 @@ def _main_workflow_with_macro(tmp_path: Path) -> Path:
 
 
 def test_registered_macro_becomes_utility_called_in_flow(tmp_path: Path) -> None:
+    from convert.renderer import render_utility_module, utils_module_name
+
     macro_wf = parse_yxmd(FIXTURES / "normalize_names.yxmc")
     main_wf = parse_yxmd(_main_workflow_with_macro(tmp_path))
 
@@ -73,12 +75,21 @@ def test_registered_macro_becomes_utility_called_in_flow(tmp_path: Path) -> None
     assert macro.name == "macro_normalize_names"
     assert any(isinstance(s, MacroCallStep) and s.macro == macro.name for s in spec.steps)
 
+    # the macro body lives in a separate, shared utility module...
+    module = utils_module_name(spec)
+    util_code = render_utility_module(spec)
+    assert util_code is not None
+    assert "def macro_normalize_names(df_macro_input):" in util_code
+    # macro internals: uppercase formula + filter, translated to Spark SQL
+    assert "upper(`First`) || ' ' || upper(`Last`)" in util_code
+    compile(util_code, "<generated>", "exec")
+
+    # ...and every format imports it and calls it rather than inlining it.
     for renderer in (render_pyspark, render_databricks_notebook, render_sdp):
         code = renderer(spec)
-        assert "def macro_normalize_names(df_macro_input):" in code
+        assert "def macro_normalize_names(df_macro_input):" not in code
+        assert f"from {module} import macro_normalize_names" in code
         assert "macro_normalize_names(df_1)" in code
-        # macro internals: uppercase formula + filter, translated to Spark SQL
-        assert "upper(`First`) || ' ' || upper(`Last`)" in code
 
     job = render_pyspark(spec)
     compile(job, "<generated>", "exec")

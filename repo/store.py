@@ -80,6 +80,11 @@ class MigrationRepo:
     def _macro_dir(self) -> Path:
         return self.root / "macros"
 
+    @property
+    def macro_dir(self) -> Path:
+        """Public accessor for callers that need to key a cache on this path."""
+        return self._macro_dir()
+
     def write_macro(self, workflow: Workflow) -> str:
         """Register a parsed .yxmc macro; returns the registry key."""
         key = workflow.name.lower()
