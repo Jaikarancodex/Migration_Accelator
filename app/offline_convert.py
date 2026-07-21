@@ -50,6 +50,9 @@ _AGG_FUNC_MAP = {"sum": "sum", "count": "count", "avg": "avg", "min": "min", "ma
 
 _UC_IDENTIFIER = re.compile(r"[A-Za-z0-9_]+(\.[A-Za-z0-9_]+){1,2}")
 _SQL_HINT = re.compile(r"\bselect\b.+\bfrom\b", re.IGNORECASE | re.DOTALL)
+_DATA_FILE_EXT = re.compile(r"\.(csv|tsv|txt|xlsx?|yxdb|json|parquet|avro|orc)$", re.IGNORECASE)
+_DOTTED_DB_REF = re.compile(r"[\w ]+(\.[\w ]+)+")
+_SQL_FROM_REF = re.compile(r"\bfrom\s+((?:\[[^\]]+\]|[\w.#])+)", re.IGNORECASE)
 
 
 def _looks_like_sql(raw: str) -> bool:
@@ -67,14 +70,18 @@ def _looks_like_sql(raw: str) -> bool:
 def _sanitize_table_name(raw: str) -> str:
     """Derive a Unity Catalog table name from a file path or database reference.
 
-    Handles UNC/posix file paths (basename minus extension), Alteryx
-    connection strings ('aka:...|||[DB].[dbo].[Table]' -> last bracket
-    segment), and arbitrary text (non-word chars collapse to underscores).
+    Keeps the *actual* table name where one exists: the last segment of a
+    dotted database reference ('IONPMVIEW.dbo.project_cube_le' ->
+    'project_cube_le') or of a bracketed one ('[DB].[dbo].[Table]' ->
+    'table'), and a file path's basename minus extension. Only genuinely
+    unstructured text collapses wholesale to underscores.
     """
-    name = raw.split("|||")[-1]
+    name = raw.split("|||")[-1].strip()
     brackets = re.findall(r"\[([^\]]+)\]", name)
     if brackets:
         name = brackets[-1]
+    elif _DOTTED_DB_REF.fullmatch(name) and not _DATA_FILE_EXT.search(name):
+        name = name.rsplit(".", 1)[-1]
     else:
         name = re.split(r"[\\/]", name)[-1]
         name = re.sub(r"\.[A-Za-z0-9]+$", "", name)
@@ -82,16 +89,45 @@ def _sanitize_table_name(raw: str) -> str:
     return name or "unnamed"
 
 
+def _sql_source_table(raw: str) -> str | None:
+    """The actual table read by a trivially simple SQL source, else None.
+
+    Only a single-FROM, join-free query with a plain (non-temp) table
+    reference qualifies — anything more complex has no single \"actual
+    table\" and keeps its todo_source_* placeholder.
+    """
+    query = raw.split("|||")[-1]
+    if len(re.findall(r"\bfrom\b", query, re.IGNORECASE)) != 1:
+        return None
+    if re.search(r"\bjoin\b", query, re.IGNORECASE):
+        return None
+    match = _SQL_FROM_REF.search(query)
+    if match is None:
+        return None
+    ref = match.group(1)
+    if "#" in ref:  # SQL Server temp table: no durable source to point at
+        return None
+    brackets = re.findall(r"\[([^\]]+)\]", ref)
+    last = brackets[-1] if brackets else ref.rsplit(".", 1)[-1]
+    name = re.sub(r"\W+", "_", last).strip("_").lower()
+    return name or None
+
+
 def _source_table(raw: str, target: TargetRef, node_id: str) -> str:
     """Keep UC-style identifiers as-is; retarget file/DB refs into the target schema.
 
-    A custom-SQL source has no real table name, so it's landed as an
-    explicit todo_source_<node_id> placeholder — loud and reviewable —
-    instead of a plausible-but-wrong name derived from the query text.
+    A simple 'SELECT ... FROM one_table' source is landed under that
+    table's real name; a complex query has no single real table, so it
+    lands as an explicit todo_source_<node_id> placeholder — loud and
+    reviewable — instead of a plausible-but-wrong name derived from the
+    query text.
     """
     if _UC_IDENTIFIER.fullmatch(raw):
         return raw
     if _looks_like_sql(raw):
+        derived = _sql_source_table(raw)
+        if derived is not None:
+            return f"{target.catalog}.{target.schema_}.{derived}"
         return f"{target.catalog}.{target.schema_}.todo_source_{node_id}"
     return f"{target.catalog}.{target.schema_}.{_sanitize_table_name(raw)}"
 

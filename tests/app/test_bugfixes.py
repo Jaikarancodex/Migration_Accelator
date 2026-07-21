@@ -132,3 +132,65 @@ def test_sql_query_source_becomes_flagged_placeholder_not_mangled_name(tmp_path:
     assert read.source_table == "main.migration_dev.todo_source_1"
     assert "select" not in read.source_table.lower()
     assert "tempfinalresult" not in read.source_table.lower()
+
+
+def test_output_dotted_db_ref_keeps_actual_table_name() -> None:
+    """'aka:<conn>|||IONPMVIEW.dbo.project_cube_le' wrote to the mangled
+    'ionpmview_dbo_project_cube_le' in a real migrated workflow (W3). The
+    actual table name is the last segment.
+    """
+    from app.offline_convert import _sanitize_table_name
+
+    assert _sanitize_table_name("aka:65cf6443|||IONPMVIEW.dbo.project_cube_le") == "project_cube_le"
+    assert _sanitize_table_name("[IONPMVIEW].[dbo].[Project_Cube_LE]") == "project_cube_le"
+    assert _sanitize_table_name("dbo.StockList") == "stocklist"
+    # file paths keep basename-minus-extension behavior
+    assert _sanitize_table_name(r"C:\data\sales export.csv") == "sales_export"
+    assert _sanitize_table_name("report.final.xlsx") == "report_final"
+
+
+def test_simple_sql_source_lands_under_its_actual_table_name(tmp_path: Path) -> None:
+    xml = """<?xml version="1.0"?>
+<AlteryxDocument yxmdVer="2023.1">
+  <Nodes>
+    <Node ToolID="1"><GuiSettings Plugin="AlteryxBasePluginsGui.DbFileInput.DbFileInput"/>
+      <Properties><Configuration>
+        <File>aka:6401126c|||SELECT a, b FROM Stocklist.dbo.StockList WHERE VersionOrder = 1</File>
+      </Configuration></Properties></Node>
+    <Node ToolID="2"><GuiSettings Plugin="AlteryxBasePluginsGui.DbFileOutput.DbFileOutput"/>
+      <Properties><Configuration><File>main.x.out</File></Configuration></Properties></Node>
+  </Nodes>
+  <Connections>
+    <Connection><Origin ToolID="1" Connection="Output" /><Destination ToolID="2" Connection="Input" /></Connection>
+  </Connections>
+</AlteryxDocument>"""
+    path = tmp_path / "simplesql.yxmd"
+    path.write_text(xml, encoding="utf-8")
+    wf = parse_yxmd(path)
+    spec = naive_spec_from_workflow(wf, TARGET)
+    read = next(s for s in spec.steps if s.op == "read")
+    # single-table SELECT: the actual table, not an anonymous todo_source_1
+    assert read.source_table == "main.migration_dev.stocklist"
+
+
+def test_complex_sql_source_still_lands_as_todo_placeholder(tmp_path: Path) -> None:
+    xml = """<?xml version="1.0"?>
+<AlteryxDocument yxmdVer="2023.1">
+  <Nodes>
+    <Node ToolID="1"><GuiSettings Plugin="AlteryxBasePluginsGui.DbFileInput.DbFileInput"/>
+      <Properties><Configuration>
+        <File>aka:6401126c|||SELECT * FROM a.b JOIN c.d ON a.b.x = c.d.x</File>
+      </Configuration></Properties></Node>
+    <Node ToolID="2"><GuiSettings Plugin="AlteryxBasePluginsGui.DbFileOutput.DbFileOutput"/>
+      <Properties><Configuration><File>main.x.out</File></Configuration></Properties></Node>
+  </Nodes>
+  <Connections>
+    <Connection><Origin ToolID="1" Connection="Output" /><Destination ToolID="2" Connection="Input" /></Connection>
+  </Connections>
+</AlteryxDocument>"""
+    path = tmp_path / "joinsql.yxmd"
+    path.write_text(xml, encoding="utf-8")
+    wf = parse_yxmd(path)
+    spec = naive_spec_from_workflow(wf, TARGET)
+    read = next(s for s in spec.steps if s.op == "read")
+    assert read.source_table == "main.migration_dev.todo_source_1"
