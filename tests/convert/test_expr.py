@@ -62,3 +62,22 @@ def test_unknown_functions_flags_untranslated_call() -> None:
 def test_unknown_functions_ignores_field_refs_and_keywords() -> None:
     result = alteryx_expr_to_spark("CASE WHEN [A] IN ('x','y') THEN 1 ELSE 0 END")
     assert unknown_functions(result) == set()
+
+
+def test_datetimetoutc_one_arg_defaults_to_utc() -> None:
+    assert alteryx_expr_to_spark("DateTimetoUTC(current_date())") == (
+        "to_utc_timestamp(current_date(), 'UTC')"
+    )
+    assert unknown_functions(alteryx_expr_to_spark("DateTimetoUTC([t])")) == set()
+
+
+def test_datetimetoutc_two_arg_keeps_timezone() -> None:
+    assert alteryx_expr_to_spark('DateTimeToUTC([ts], "Europe/Paris")') == (
+        'to_utc_timestamp(`ts`, "Europe/Paris")'
+    )
+
+
+def test_datetimetolocal_maps_to_from_utc_timestamp() -> None:
+    assert alteryx_expr_to_spark("DateTimeToLocal([ts])") == (
+        "from_utc_timestamp(`ts`, 'UTC')"
+    )

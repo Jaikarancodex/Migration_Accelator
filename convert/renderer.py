@@ -320,14 +320,27 @@ def _render_call_function(step: CallFunctionStep) -> str:
 
 _WRITE_MODES = {"overwrite", "append"}
 
+# Writer options that create the target as a column-mapping Delta table, so
+# columns with spaces/brackets are accepted. Setting columnMapping.mode=name
+# requires the reader/writer protocol bump, so both are pinned alongside it.
+_COLUMN_MAPPING_OPTS = (
+    '.option("delta.columnMapping.mode", "name")'
+    '.option("delta.minReaderVersion", "2")'
+    '.option("delta.minWriterVersion", "5")'
+)
 
-def _render_write(step: WriteStep) -> str:
+
+def _render_write(step: WriteStep, column_mapping: bool = False) -> str:
     if step.mode not in _WRITE_MODES:
         return (
             f"# TODO: mode={step.mode!r} is not yet rendered (needs a MERGE INTO statement).\n"
             f"{_var(step.id)} = {_var(step.input)}  # target_table={step.target_table}"
         )
-    return f'{_var(step.input)}.write.mode({step.mode!r}).saveAsTable("{step.target_table}")'
+    opts = _COLUMN_MAPPING_OPTS if column_mapping else ""
+    return (
+        f'{_var(step.input)}.write{opts}.mode({step.mode!r})'
+        f'.saveAsTable("{step.target_table}")'
+    )
 
 
 _RENDERERS: dict[type, Callable[[Any], str]] = {
@@ -347,15 +360,66 @@ _RENDERERS: dict[type, Callable[[Any], str]] = {
     AppendFieldsStep: _render_append_fields,
     AggregateStep: _render_aggregate,
     CallFunctionStep: _render_call_function,
-    WriteStep: _render_write,
 }
 
 
-def _render_step(step: Step) -> str:
+def _render_step(step: Step, *, column_mapping: bool = False) -> str:
+    # WriteStep is routed specially so it can receive the spec-level
+    # column-mapping flag (the dispatch dict is single-arg).
+    if isinstance(step, WriteStep):
+        return _render_write(step, column_mapping=column_mapping)
     renderer = _RENDERERS.get(type(step))
     if renderer is None:
         raise ValueError(f"No renderer registered for step type {type(step).__name__}")
     return renderer(step)
+
+
+# Characters Delta rejects in a column name unless column mapping is enabled
+# (spaces and structural punctuation), plus the brackets Alteryx cube-style
+# field names carry. Any of these anywhere in a produced/consumed column name
+# means the output table needs delta.columnMapping.mode = name.
+_DELTA_UNSAFE_COL = re.compile(r"[ ,;{}()\[\]\t\n=]")
+
+
+def _spec_column_names(spec: PipelineSpec) -> set[str]:
+    """Every column name the spec reads or produces, across all steps."""
+    names: set[str] = set()
+    for step in _all_steps(spec):
+        if isinstance(step, SelectStep):
+            for col in step.columns:
+                names.add(col.column)
+                if col.rename:
+                    names.add(col.rename)
+        elif isinstance(step, WithColumnsStep):
+            names.update(c.name for c in step.columns)
+        elif isinstance(step, AggregateStep):
+            names.update(step.group_by)
+            for agg in step.aggregations:
+                names.update((agg.column, agg.alias))
+        elif isinstance(step, SortStep):
+            names.update(c.column for c in step.columns)
+        elif isinstance(step, DistinctStep):
+            names.update(step.columns)
+        elif isinstance(step, RecordIdStep):
+            names.add(step.column)
+        elif isinstance(step, CleanseStep) and step.columns:
+            names.update(step.columns)
+        elif isinstance(step, FindReplaceStep):
+            names.update((step.find_column, step.search_column, step.replace_column))
+        elif isinstance(step, JoinStep):
+            names.update(step.left_keys)
+            names.update(step.right_keys)
+    return names
+
+
+def _needs_column_mapping(spec: PipelineSpec) -> bool:
+    """True when any column name would be illegal in a plain (unmapped) Delta table.
+
+    Alteryx field names routinely contain spaces and brackets
+    (`ProjectCube_Data[Redbox Customer]`, `Legal Entity`); Delta rejects
+    those at write time unless the table has delta.columnMapping.mode = name.
+    """
+    return any(_DELTA_UNSAFE_COL.search(name) for name in _spec_column_names(spec))
 
 
 def _function_imports(spec: PipelineSpec) -> list[str]:
@@ -439,7 +503,8 @@ def render_pyspark(spec: PipelineSpec) -> str:
             f"{utility_import}"
         )
     parts.append("\n\ndef run(spark) -> None:  # noqa: ANN001")
-    body_lines = [_render_step(step) for step in spec.steps]
+    col_map = _needs_column_mapping(spec)
+    body_lines = [_render_step(step, column_mapping=col_map) for step in spec.steps]
     indented = "\n".join("    " + line.replace("\n", "\n    ") for line in body_lines)
     parts.append(indented)
 
@@ -468,7 +533,8 @@ def render_databricks_notebook(spec: PipelineSpec) -> str:
         # notebook) is importable directly with no path manipulation.
         imports.append(utility_import)
     cells = ["\n".join(imports)]
-    cells.extend(_render_step(step) for step in spec.steps)
+    col_map = _needs_column_mapping(spec)
+    cells.extend(_render_step(step, column_mapping=col_map) for step in spec.steps)
 
     header = (
         "# Databricks notebook source\n"
@@ -483,10 +549,19 @@ def _sdp_table_name(target_table: str) -> str:
     return re.sub(r"\W", "_", name)
 
 
-def _dp_table(name: str, comment: str, body_lines: list[str]) -> str:
+def _dp_table(
+    name: str,
+    comment: str,
+    body_lines: list[str],
+    table_properties: dict[str, str] | None = None,
+) -> str:
     indented = "\n".join("    " + line.replace("\n", "\n    ") for line in body_lines)
+    props = ""
+    if table_properties:
+        kv = ", ".join(f'"{k}": "{v}"' for k, v in table_properties.items())
+        props = f", table_properties={{{kv}}}"
     return (
-        f'\n@dp.table(name="{name}", comment="{comment}")\n'
+        f'\n@dp.table(name="{name}", comment="{comment}"{props})\n'
         f"def {name}():  # noqa: ANN201\n{indented}"
     )
 
@@ -563,6 +638,12 @@ def render_sdp(spec: PipelineSpec) -> str:
     gold_steps = middle[first_agg_index:]
 
     parts = [_HEADER.format(name=spec.name), "from pyspark import pipelines as dp"]
+    # Special-character column names (Alteryx brackets/spaces) need Delta
+    # column mapping on every table that stores them — bronze already
+    # materializes the raw source columns, so all three layers get it.
+    col_props = (
+        {"delta.columnMapping.mode": "name"} if _needs_column_mapping(spec) else None
+    )
     imports = _function_imports(spec)
     if imports:
         parts.append("\n".join(imports))
@@ -596,7 +677,8 @@ def render_sdp(spec: PipelineSpec) -> str:
         bronze_names[read.id] = name
         parts.append(
             _dp_table(name, f"Raw landing of {read.source_table}",
-                      [f'return spark.read.table("{read.source_table}")'])
+                      [f'return spark.read.table("{read.source_table}")'],
+                      table_properties=col_props)
         )
 
     # Silver: cleaned/conformed transforms over bronze.
@@ -607,7 +689,10 @@ def render_sdp(spec: PipelineSpec) -> str:
     silver_body.extend(_render_step(step) for step in silver_steps)
     silver_last = silver_steps[-1].id if silver_steps else (reads[-1].id if reads else "")
     silver_body.append(f"return {_var(silver_last)}")
-    parts.append(_dp_table(silver, f"Transformed data for {spec.name}", silver_body))
+    parts.append(
+        _dp_table(silver, f"Transformed data for {spec.name}", silver_body,
+                  table_properties=col_props)
+    )
 
     # Gold: business-level output per write step. Each write's body includes
     # only the steps it actually depends on (walked backward through the
@@ -663,7 +748,7 @@ def render_sdp(spec: PipelineSpec) -> str:
             body.append(f"return {_var(final)}")
         else:
             body = [f'return spark.read.table("{silver}")']
-        parts.append(_dp_table(gold, comment, body))
+        parts.append(_dp_table(gold, comment, body, table_properties=col_props))
 
     orphaned = [s.id for s in gold_steps if s.id not in reachable]
     if orphaned:

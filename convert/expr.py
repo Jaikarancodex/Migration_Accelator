@@ -68,6 +68,7 @@ _KNOWN_SAFE_FUNCTIONS: frozenset[str] = frozenset({
     "round", "abs", "ceil", "floor", "sqrt", "power", "mod", "nullif",
     "cast", "greatest", "least", "now", "date", "to_date", "to_timestamp",
     "date_format", "datediff", "date_add", "date_sub", "dateadd",
+    "to_utc_timestamp", "from_utc_timestamp",
     "regexp_extract", "split", "array", "size", "sum", "count", "avg",
     "min", "max", "distinct", "in", "like", "between", "exists",
     # SQL keywords that can appear immediately before "(" in generated text
@@ -154,6 +155,29 @@ def _rewrite_datetimeadd(expr: str) -> str:
     return expr
 
 
+def _rewrite_tz_convert(expr: str, alteryx_name: str, spark_name: str) -> str:
+    """Alteryx DateTimeToUTC/DateTimeToLocal(dt[, tz]) -> Spark to/from_utc_timestamp.
+
+    Alteryx's DateTimeToUTC(dt, tz) reads dt as being in tz and converts to
+    UTC — exactly Spark's to_utc_timestamp(dt, tz) (and DateTimeToLocal ->
+    from_utc_timestamp). Databricks has no DateTimeToUTC, so this was a hard
+    runtime failure before. When no timezone is given, default to 'UTC'.
+    """
+    search_from = 0
+    while (found := _find_call(expr, alteryx_name, search_from)) is not None:
+        start, end, args = found
+        if len(args) == 1:
+            replacement = f"{spark_name}({args[0]}, 'UTC')"
+        elif len(args) >= 2:
+            replacement = f"{spark_name}({args[0]}, {args[1]})"
+        else:
+            search_from = end
+            continue
+        expr = f"{expr[:start]}{replacement}{expr[end:]}"
+        search_from = start + len(replacement)
+    return expr
+
+
 def _rewrite_isempty(expr: str) -> str:
     while (found := _find_call(expr, "isempty")) is not None:
         start, end, args = found
@@ -225,6 +249,8 @@ def alteryx_expr_to_spark(expression: str) -> str:
     expr = _rewrite_block_if(expr)
     expr = _rename_functions(expr)
     expr = _rewrite_datetimeadd(expr)
+    expr = _rewrite_tz_convert(expr, "datetimetoutc", "to_utc_timestamp")
+    expr = _rewrite_tz_convert(expr, "datetimetolocal", "from_utc_timestamp")
     expr = _rewrite_isempty(expr)
     expr = _rewrite_substring(expr)
     expr = _rewrite_string_concat(expr)

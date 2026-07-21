@@ -493,3 +493,46 @@ def test_render_unknown_function_raises() -> None:
     )
     with pytest.raises(ValueError, match="does_not_exist"):
         render_pyspark(spec)
+
+
+def _spec_with_special_cols() -> PipelineSpec:
+    return PipelineSpec(
+        name="spaced", language="pyspark", source=SOURCE, target=TARGET,
+        steps=[
+            ReadStep(id="r", source_table="legacy.src", alias="src"),
+            SelectStep(
+                id="s", input="r",
+                columns=[
+                    ColumnSelection(column="ProjectCube_Data[Redbox Customer]", rename="Redbox Customer"),
+                    ColumnSelection(column="Amount"),
+                ],
+            ),
+            WriteStep(id="w", input="s", target_table="main.dev.spaced_out", mode="overwrite"),
+        ],
+    )
+
+
+def test_special_column_names_enable_delta_column_mapping_all_formats() -> None:
+    spec = _spec_with_special_cols()
+    sdp = render_sdp(spec)
+    job = render_pyspark(spec)
+    notebook = render_databricks_notebook(spec)
+    compile(sdp, "<g>", "exec")
+    compile(job, "<g>", "exec")
+    # SDP: every @dp.table carries the column-mapping property (bronze+silver+gold)
+    assert sdp.count('"delta.columnMapping.mode": "name"') == 3
+    assert "table_properties=" in sdp
+    # job / notebook: the write enables column mapping via writer options
+    assert 'delta.columnMapping.mode", "name"' in job
+    assert 'delta.minReaderVersion", "2"' in job
+    assert 'delta.columnMapping.mode", "name"' in notebook
+
+
+def test_clean_column_names_do_not_enable_column_mapping() -> None:
+    # _full_spec uses only plain identifiers (Amount, Region, TotalSales...)
+    sdp = render_sdp(_full_spec())
+    job = render_pyspark(_full_spec())
+    assert "columnMapping" not in sdp
+    assert "columnMapping" not in job
+    # the plain write is unchanged
+    assert ".write.mode('overwrite').saveAsTable(" in job
