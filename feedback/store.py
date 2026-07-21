@@ -144,6 +144,11 @@ def _load_error_records(store_path: Path | None = None) -> list[DeployErrorRecor
     ]
 
 
+def correction_count(store_path: Path | None = None) -> int:
+    """Total human corrections logged — the size of the learning corpus."""
+    return len(_load_records(store_path))
+
+
 def correction_counts_by_tool(store_path: Path | None = None) -> dict[str, int]:
     """How often each Alteryx tool type appears in human-corrected conversions.
 

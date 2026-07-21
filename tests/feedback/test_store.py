@@ -94,3 +94,13 @@ def test_deploy_error_stats_and_recent(tmp_path: Path) -> None:
     assert deploy_error_counts_by_stage(store_path=store) == {"run": 2, "deploy": 1}
     recent = recent_deploy_errors(limit=2, store_path=store)
     assert [r.workflow_name for r in recent] == ["wf3", "wf2"]  # newest first
+
+
+def test_correction_count(tmp_path: Path) -> None:
+    from feedback.store import correction_count, log_conversion_triple
+
+    store = tmp_path / "fb.jsonl"
+    assert correction_count(store_path=store) == 0
+    log_conversion_triple("a", ["filter"], "x", "y", store_path=store)
+    log_conversion_triple("b", ["join"], "x", "z", store_path=store)
+    assert correction_count(store_path=store) == 2

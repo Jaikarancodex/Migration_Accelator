@@ -62,6 +62,7 @@ from deploy.dbsql import (
 from deploy.export import deploy_bundle, export_bundle_from_spec, run_bundle_job
 from deploy.gitops import GitError, commit_and_push, repo_info, set_remote
 from feedback.store import (
+    correction_count,
     correction_counts_by_tool,
     deploy_error_counts_by_stage,
     find_similar_corrections,
@@ -155,7 +156,7 @@ with st.sidebar:
             st.warning("Nothing to ingest — upload a .yxmd or tick the sample checkbox.")
 
     st.divider()
-    st.header("Macros (.yxmc)")
+    st.header("2. Macros (.yxmc)")
     st.caption(
         "Upload the macro files your workflows reference. Registered macros are "
         "converted into generated utility functions and called from the main pipeline."
@@ -192,7 +193,7 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
-    st.header("Git repository")
+    st.header("3. Git repository")
     st.caption(
         "Version every deployed bundle in git. The bundle folder is committed and "
         "pushed here as part of Migrate & deploy."
@@ -221,7 +222,7 @@ with st.sidebar:
     )
 
     st.divider()
-    st.header("2. Target defaults")
+    st.header("4. Target defaults")
     catalog = st.text_input("Catalog", value=TARGET_DEFAULTS.catalog)
     schema_name = st.text_input("Schema", value=TARGET_DEFAULTS.schema_name)
     layer_options = ["bronze", "silver", "gold"]
@@ -229,18 +230,57 @@ with st.sidebar:
     target = TargetRef(catalog=catalog, schema=schema_name, layer=cast(MedallionLayer, layer))
 
     st.divider()
-    st.header("3. LLM backend")
+    st.header("5. LLM backend")
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        typed_key = st.text_input(
+            "Anthropic API key",
+            type="password",
+            key="anthropic_key_input",
+            help="Create one at console.anthropic.com under API keys. Held in this "
+            "app's process memory for the session only — never written to disk, "
+            "git, or logs.",
+        )
+        if typed_key.strip():
+            os.environ["ANTHROPIC_API_KEY"] = typed_key.strip()
+            st.toast("Anthropic key set for this session.")
+        with st.expander("Set it permanently instead"):
+            st.code('setx ANTHROPIC_API_KEY "sk-ant-..."', language="powershell")
+            st.caption(
+                "Run once in PowerShell, then restart the app — the key loads "
+                "from the environment automatically and this field disappears."
+            )
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
     backend = st.radio(
         "Conversion backend",
-        ["Anthropic (needs ANTHROPIC_API_KEY)", "Offline demo (rule-based, no LLM)"],
+        ["Anthropic Claude (LLM)", "Offline demo (rule-based, no LLM)"],
         index=0 if has_key else 1,
     )
     if backend.startswith("Anthropic") and not has_key:
-        st.warning("ANTHROPIC_API_KEY is not set in this environment — falls back to offline mode.")
+        st.warning(
+            "No Anthropic key yet — paste one above to enable LLM conversion, "
+            "AI repair, and format recommendations. Falling back to offline mode."
+        )
 
 repo = _repo()
 object_names = repo_cache.list_object_names(repo)
+
+_n_macros = len(repo_cache.list_macro_names(repo))
+_n_learned = correction_count()
+_llm_pill = (
+    '<span class="ma-pill" style="border-color:#22c55e;color:#22c55e">LLM: Anthropic connected</span>'
+    if has_key
+    else '<span class="ma-pill" style="border-color:#f59e0b;color:#f59e0b">'
+    "LLM: offline rule-based — add a key in the sidebar</span>"
+)
+st.markdown(
+    '<div style="display:flex;flex-wrap:wrap;gap:8px;margin:-2px 0 14px">'
+    f'<span class="ma-pill">{len(object_names)} workflow(s) ingested</span>'
+    f'<span class="ma-pill">{_n_macros} macro(s) registered</span>'
+    f"{_llm_pill}"
+    f'<span class="ma-pill">{_n_learned} correction(s) learned</span>'
+    "</div>",
+    unsafe_allow_html=True,
+)
 
 FORMAT_LABELS: dict[ArtifactFormat, str] = {
     "job": "Job script (spark_python_task)",
@@ -265,6 +305,23 @@ def _render_artifact_preview(spec: PipelineSpec, artifact_format: ArtifactFormat
     """
     main_code = _ARTIFACT_RENDERERS[artifact_format](spec)
     utility_code = render_utility_module(spec)
+
+    # The renderer marks anything it could not translate with certainty
+    # (unknown Alteryx functions, approximated silver-chain reads, name
+    # collisions) with a REVIEW comment. Surface those up front — they are
+    # the exact lines a reviewer must check before trusting the code.
+    review_lines = [
+        line.strip()
+        for line in (main_code + "\n" + (utility_code or "")).splitlines()
+        if "REVIEW" in line
+    ]
+    if review_lines:
+        st.warning(
+            f"{len(review_lines)} line(s) flagged REVIEW — verify these before deploying."
+        )
+        with st.expander("Show flagged lines"):
+            st.code("\n".join(review_lines), language="python")
+
     if utility_code is None:
         st.code(main_code, language="python")
         return
