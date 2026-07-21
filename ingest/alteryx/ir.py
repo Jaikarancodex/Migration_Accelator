@@ -10,7 +10,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 
 class ToolType(StrEnum):
@@ -95,6 +95,22 @@ class SummarizeAction(BaseModel):
     rename: str | None = None
 
 
+class UpstreamEdge(BaseModel):
+    """One incoming connection, with both endpoints' anchor names.
+
+    Alteryx tools have multiple *output* anchors carrying different data —
+    Filter emits True and False streams, Join emits L (unjoined left),
+    J (joined), and R (unjoined right), Unique emits U and D. Which anchor a
+    connection originates from decides what rows actually flow down it, so
+    dropping it (as `upstream_ids` alone does) silently substitutes one
+    stream for another.
+    """
+
+    origin_id: str
+    origin_anchor: str = ""  # e.g. "True"/"False", "Left"/"Join"/"Right", "Unique"/"Dup"
+    dest_label: str = ""  # e.g. "Left"/"Right", "Source"/"Targets", "F"/"R"
+
+
 class Node(BaseModel):
     """A single tool in the Alteryx workflow, extracted into typed config."""
 
@@ -102,6 +118,11 @@ class Node(BaseModel):
     tool_type: ToolType
     raw_plugin: str = Field(description="Original Alteryx plugin name, for traceability")
     upstream_ids: list[str] = Field(default_factory=list)
+    upstream_edges: list[UpstreamEdge] = Field(
+        default_factory=list,
+        description="Incoming connections with origin/destination anchors; "
+        "empty on IR persisted before anchors were captured",
+    )
 
     # tool-specific configuration; only the relevant fields are populated
     connection: dict[str, Any] | None = None  # INPUT: connection string/path/table
@@ -150,6 +171,23 @@ class Workflow(BaseModel):
     nodes: list[Node] = Field(default_factory=list)
     unsupported: list[UnsupportedTool] = Field(default_factory=list)
 
+    # Lazy lookup maps for resolve_supported_upstream, rebuilt whenever the
+    # node/unsupported lists are replaced (keyed on their identity+length).
+    # Without this, each call rebuilds both maps — O(n) per call, O(n^2)
+    # across a conversion — which big workflows turn into real wall time.
+    _lookup_key: tuple[int, int, int, int] | None = PrivateAttr(default=None)
+    _lookup_maps: tuple[set[str], dict[str, UnsupportedTool]] | None = PrivateAttr(default=None)
+
+    def _upstream_maps(self) -> tuple[set[str], dict[str, UnsupportedTool]]:
+        key = (id(self.nodes), len(self.nodes), id(self.unsupported), len(self.unsupported))
+        if self._lookup_maps is None or self._lookup_key != key:
+            self._lookup_maps = (
+                {n.tool_id for n in self.nodes},
+                {u.tool_id: u for u in self.unsupported},
+            )
+            self._lookup_key = key
+        return self._lookup_maps
+
     def node_by_id(self, tool_id: str) -> Node | None:
         return next((n for n in self.nodes if n.tool_id == tool_id), None)
 
@@ -164,8 +202,7 @@ class Workflow(BaseModel):
         the unsupported chain upward so converters can bridge over skipped
         tools instead of referencing steps that don't exist.
         """
-        supported = {n.tool_id for n in self.nodes}
-        unsupported_by_id = {u.tool_id: u for u in self.unsupported}
+        supported, unsupported_by_id = self._upstream_maps()
         seen: set[str] = set()
         current = tool_id
         while current not in supported:
@@ -179,21 +216,34 @@ class Workflow(BaseModel):
         return current
 
     def topological_order(self) -> list[Node]:
-        """Return nodes ordered so every node's upstream nodes precede it."""
+        """Return nodes ordered so every node's upstream nodes precede it.
+
+        Iterative DFS with an explicit stack: production workflows can chain
+        hundreds of tools deep, and the recursive version blows Python's
+        recursion limit (a hard crash on ingest) around ~500 chained tools.
+        """
         visited: set[str] = set()
         ordered: list[Node] = []
         by_id = {n.tool_id: n for n in self.nodes}
 
-        def visit(node: Node) -> None:
-            if node.tool_id in visited:
-                return
-            visited.add(node.tool_id)
-            for up_id in node.upstream_ids:
-                up = by_id.get(up_id)
-                if up is not None:
-                    visit(up)
-            ordered.append(node)
-
-        for n in self.nodes:
-            visit(n)
+        for root in self.nodes:
+            if root.tool_id in visited:
+                continue
+            visited.add(root.tool_id)
+            stack: list[tuple[Node, int]] = [(root, 0)]
+            while stack:
+                node, i = stack[-1]
+                descended = False
+                while i < len(node.upstream_ids):
+                    up = by_id.get(node.upstream_ids[i])
+                    i += 1
+                    if up is not None and up.tool_id not in visited:
+                        visited.add(up.tool_id)
+                        stack[-1] = (node, i)
+                        stack.append((up, 0))
+                        descended = True
+                        break
+                if not descended:
+                    ordered.append(node)
+                    stack.pop()
         return ordered

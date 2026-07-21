@@ -32,6 +32,7 @@ from ingest.alteryx.ir import (
     SummarizeAction,
     ToolType,
     UnsupportedTool,
+    UpstreamEdge,
     Workflow,
 )
 
@@ -275,6 +276,7 @@ def _parse_node(
     elem: Element,
     connections: dict[str, list[str]],
     labels: dict[str, dict[str, str]] | None = None,
+    edges: dict[str, list[UpstreamEdge]] | None = None,
 ) -> Node | UnsupportedTool:
     tool_id = elem.get("ToolID", "")
     gui_settings = elem.find("GuiSettings")
@@ -315,6 +317,7 @@ def _parse_node(
         raw_plugin=plugin,
         upstream_ids=connections.get(tool_id, []),
         upstream_labels=(labels or {}).get(tool_id, {}),
+        upstream_edges=(edges or {}).get(tool_id, []),
         annotation=_text(annotation_elem),
         position=_parse_position(gui_settings),
     )
@@ -370,19 +373,27 @@ def _iter_node_elements(parent: Element) -> Iterator[Element]:
         yield node_elem
 
 
-def _parse_connections(root: Element) -> tuple[dict[str, list[str]], dict[str, dict[str, str]]]:
-    """Map destination ToolID -> origin ToolIDs, plus labeled inputs.
+def _parse_connections(
+    root: Element,
+) -> tuple[dict[str, list[str]], dict[str, dict[str, str]], dict[str, list[UpstreamEdge]]]:
+    """Map destination ToolID -> origin ToolIDs, labeled inputs, and full edges.
 
     The second mapping keys each destination's inputs by the destination
     connection name (Left/Right, Targe/Source, F/R...), which is what makes
     two-input tools (Join, Find Replace, Append Fields) side-exact instead
     of order-guessed.
+
+    The third mapping keeps each connection's *origin* anchor too (Filter's
+    True/False, Join's Left/Join/Right, Unique's Unique/Dup). Two edges from
+    the same origin tool but different anchors carry different data — without
+    the anchor they collapse into indistinguishable `upstream_ids` entries.
     """
     upstream: dict[str, list[str]] = {}
     labels: dict[str, dict[str, str]] = {}
+    edges: dict[str, list[UpstreamEdge]] = {}
     connections_elem = root.find("Connections")
     if connections_elem is None:
-        return upstream, labels
+        return upstream, labels, edges
     for conn in connections_elem.findall("Connection"):
         origin = conn.find("Origin")
         destination = conn.find("Destination")
@@ -396,7 +407,14 @@ def _parse_connections(root: Element) -> tuple[dict[str, list[str]], dict[str, d
         label = destination.get("Connection")
         if label:
             labels.setdefault(dest_id, {})[label] = origin_id
-    return upstream, labels
+        edges.setdefault(dest_id, []).append(
+            UpstreamEdge(
+                origin_id=origin_id,
+                origin_anchor=origin.get("Connection") or "",
+                dest_label=label or "",
+            )
+        )
+    return upstream, labels, edges
 
 
 def parse_yxmd(path: str | Path) -> Workflow:
@@ -410,7 +428,7 @@ def parse_yxmd(path: str | Path) -> Workflow:
     tree = safe_parse(str(path))
     root = tree.getroot()
 
-    connections, connection_labels = _parse_connections(root)
+    connections, connection_labels, connection_edges = _parse_connections(root)
 
     nodes: list[Node] = []
     unsupported: list[UnsupportedTool] = []
@@ -429,7 +447,7 @@ def parse_yxmd(path: str | Path) -> Workflow:
         ):
             logger.debug("ignored_gui_tool", file=str(path), plugin=plugin)
             continue
-        parsed = _parse_node(node_elem, connections, connection_labels)
+        parsed = _parse_node(node_elem, connections, connection_labels, connection_edges)
         if isinstance(parsed, UnsupportedTool):
             logger.warning(
                 "unsupported_tool", file=str(path), tool_id=parsed.tool_id, plugin=parsed.plugin

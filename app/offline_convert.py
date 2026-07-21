@@ -116,6 +116,11 @@ class _Converter:
         # the pipeline stays runnable once an engineer lands that data in
         # the todo_source_* table.
         self.synthetic_reads: dict[str, ReadStep] = {}
+        # Steps synthesized for secondary output anchors (Filter's False
+        # stream, Join's unjoined Left/Right streams): keyed by derived id,
+        # created once no matter how many consumers tap the same anchor.
+        self.derived_steps: dict[str, Step] = {}
+        self._node_by_id = {n.tool_id: n for n in workflow.nodes}
 
     def _follow_aliases(self, tool_id: str) -> str:
         while tool_id in self._elided:
@@ -142,7 +147,9 @@ class _Converter:
         if not outputs or not steps:
             return None
         returns = sub._elided.get(outputs[0].tool_id, steps[-1].id)
-        ordered = _topological_steps(list(sub.synthetic_reads.values()) + steps)
+        ordered = _topological_steps(
+            list(sub.synthetic_reads.values()) + steps + list(sub.derived_steps.values())
+        )
         utility = MacroUtility(
             name="macro_" + re.sub(r"\W+", "_", key).strip("_"), returns=returns, steps=ordered
         )
@@ -161,6 +168,13 @@ class _Converter:
 
     def _input_id(self, node: Node) -> str:
         """Nearest emitted upstream step id, bridging unsupported and elided nodes."""
+        for edge in node.upstream_edges:
+            if edge.origin_id in self._node_by_id:
+                return self._supply(edge.origin_id, edge.origin_anchor)
+            resolved = self.workflow.resolve_supported_upstream(edge.origin_id)
+            if resolved is not None:
+                return self._follow_aliases(resolved)
+        # IR persisted before anchors were captured: fall back to plain ids.
         for upstream in node.upstream_ids:
             resolved = self.workflow.resolve_supported_upstream(upstream)
             if resolved is not None:
@@ -172,6 +186,94 @@ class _Converter:
         if resolved is None:
             return self._placeholder_read(tool_id)
         return self._follow_aliases(resolved)
+
+    def _join_sides(self, join_node: Node) -> tuple[str, str, list[str], list[str]]:
+        """The resolved (left_id, right_id, left_keys, right_keys) of a Join node.
+
+        Shared by the Join conversion itself and the derived anti-join steps
+        for its Left/Right anchors, so both agree on which stream is which.
+        """
+        labels = join_node.upstream_labels
+        ids = join_node.upstream_ids
+        left_raw = labels.get("Left") or (ids[0] if ids else join_node.tool_id)
+        # Never let a missing label collapse both sides onto one node: that
+        # renders as a self-join, silently corrupting the result.
+        right_raw = labels.get("Right") or next(
+            (uid for uid in ids if uid != left_raw), left_raw
+        )
+        left_keys = next((j.keys for j in join_node.join_inputs if j.side == "left"), [])
+        right_keys = next((j.keys for j in join_node.join_inputs if j.side == "right"), [])
+        left_id = self._supply(left_raw, self._anchor_of(join_node, left_raw, "Left"))
+        right_id = self._supply(right_raw, self._anchor_of(join_node, right_raw, "Right"))
+        return left_id, right_id, left_keys, right_keys
+
+    def _anchor_of(self, node: Node, origin_id: str, dest_label: str) -> str:
+        """The origin anchor of `node`'s edge from `origin_id` into `dest_label`."""
+        for edge in node.upstream_edges:
+            if edge.dest_label == dest_label and edge.origin_id == origin_id:
+                return edge.origin_anchor
+        for edge in node.upstream_edges:
+            if edge.origin_id == origin_id:
+                return edge.origin_anchor
+        return ""
+
+    def _supply(self, origin_id: str, anchor: str) -> str:
+        """The step id supplying the data of `origin_id`'s `anchor` output.
+
+        Most anchors are a tool's primary output and resolve as before. The
+        secondary anchors carry *different rows* and get a derived step:
+        - Filter "False": the negated filter (Alteryx's False stream);
+        - Join "Left"/"Right": the unjoined rows of that side (anti-join);
+        - Unique "Dup": no clean relational equivalent from the emitted
+          steps, so it lands as an explicit todo_duplicates_* placeholder
+          table rather than silently substituting the Unique stream.
+        """
+        origin = self._node_by_id.get(origin_id)
+        if origin is None or not anchor:
+            return self._resolve(origin_id)
+
+        if origin.tool_type == ToolType.FILTER and anchor == "False":
+            derived_id = f"{origin_id}_false"
+            if derived_id not in self.derived_steps:
+                condition = origin.filter_expression or "true"
+                self.derived_steps[derived_id] = FilterStep(
+                    id=derived_id,
+                    input=self._input_id(origin),
+                    condition=f"NOT ({condition})",
+                )
+            return derived_id
+
+        if origin.tool_type == ToolType.JOIN and anchor in ("Left", "Right"):
+            derived_id = f"{origin_id}_unjoined_{anchor.lower()}"
+            if derived_id not in self.derived_steps:
+                left_id, right_id, left_keys, right_keys = self._join_sides(origin)
+                if anchor == "Left":
+                    step = JoinStep(
+                        id=derived_id, left=left_id, right=right_id,
+                        left_keys=left_keys, right_keys=right_keys,
+                        how="left_anti", use_function="safe_join",
+                    )
+                else:
+                    step = JoinStep(
+                        id=derived_id, left=right_id, right=left_id,
+                        left_keys=right_keys, right_keys=left_keys,
+                        how="left_anti", use_function="safe_join",
+                    )
+                self.derived_steps[derived_id] = step
+            return derived_id
+
+        if origin.tool_type == ToolType.UNIQUE and anchor.lower().startswith("dup"):
+            step_id = f"dup_{origin_id}"
+            if step_id not in self.synthetic_reads:
+                table = (
+                    f"{self.target.catalog}.{self.target.schema_}.todo_duplicates_{origin_id}"
+                )
+                self.synthetic_reads[step_id] = ReadStep(
+                    id=step_id, source_table=table, alias=f"todo_duplicates_{origin_id}"
+                )
+            return step_id
+
+        return self._resolve(origin_id)
 
     def step_for_node(self, node: Node) -> Step | None:
         target = self.target
@@ -207,17 +309,7 @@ class _Converter:
             return WithColumnsStep(id=node.tool_id, input=self._input_id(node), columns=computed)
 
         if node.tool_type == ToolType.JOIN:
-            labels = node.upstream_labels
-            left_raw = labels.get("Left") or (
-                node.upstream_ids[0] if node.upstream_ids else node.tool_id
-            )
-            right_raw = labels.get("Right") or (
-                node.upstream_ids[1] if len(node.upstream_ids) > 1 else left_raw
-            )
-            left_id = self._resolve(left_raw)
-            right_id = self._resolve(right_raw)
-            left_keys = next((j.keys for j in node.join_inputs if j.side == "left"), [])
-            right_keys = next((j.keys for j in node.join_inputs if j.side == "right"), [])
+            left_id, right_id, left_keys, right_keys = self._join_sides(node)
             return JoinStep(
                 id=node.tool_id,
                 left=left_id,
@@ -229,8 +321,18 @@ class _Converter:
             )
 
         if node.tool_type == ToolType.UNION:
-            resolved = [self._resolve(u) for u in node.upstream_ids]
-            inputs = resolved if len(resolved) >= 2 else [self._input_id(node)] * 2
+            if node.upstream_edges:
+                inputs = [
+                    self._supply(e.origin_id, e.origin_anchor) for e in node.upstream_edges
+                ]
+            else:
+                inputs = [self._resolve(u) for u in node.upstream_ids]
+            if len(inputs) < 2:
+                # A one-input Union is a pass-through in Alteryx. The old
+                # fallback duplicated the single input, which self-unioned
+                # the stream and doubled every row.
+                self._elided[node.tool_id] = inputs[0] if inputs else self._input_id(node)
+                return None
             return UnionStep(id=node.tool_id, inputs=inputs)
 
         if node.tool_type == ToolType.SORT:
@@ -266,16 +368,17 @@ class _Converter:
                 self._elided[node.tool_id] = self._input_id(node)
                 return None
             labels = node.upstream_labels
-            left = labels.get("Find") or labels.get("F") or (
-                node.upstream_ids[0] if node.upstream_ids else node.tool_id
-            )
-            right = labels.get("Replace") or labels.get("R") or (
-                node.upstream_ids[1] if len(node.upstream_ids) > 1 else left
+            ids = node.upstream_ids
+            left = labels.get("Find") or labels.get("F") or (ids[0] if ids else node.tool_id)
+            # Same self-collision guard as Join: with labels missing, pick a
+            # *distinct* second id rather than replaying the first.
+            right = labels.get("Replace") or labels.get("R") or next(
+                (uid for uid in ids if uid != left), left
             )
             return FindReplaceStep(
                 id=node.tool_id,
-                left=self._resolve(left),
-                right=self._resolve(right),
+                left=self._supply(left, self._anchor_of(node, left, "F")),
+                right=self._supply(right, self._anchor_of(node, right, "R")),
                 find_column=node.find_replace.find_column,
                 search_column=node.find_replace.search_column,
                 replace_column=node.find_replace.replace_column,
@@ -301,7 +404,9 @@ class _Converter:
                     (uid for uid in ids if uid != target_id), target_id
                 )
             return AppendFieldsStep(
-                id=node.tool_id, target=self._resolve(target_id), source=self._resolve(source_id)
+                id=node.tool_id,
+                target=self._supply(target_id, self._anchor_of(node, target_id, "Source")),
+                source=self._supply(source_id, self._anchor_of(node, source_id, "Targets")),
             )
 
         if node.tool_type == ToolType.MACRO:
@@ -384,23 +489,30 @@ def _topological_steps(steps: list[Step]) -> list[Step]:
     """
     by_id = {s.id: s for s in steps}
     ordered: list[Step] = []
-    visiting: set[str] = set()
-    done: set[str] = set()
+    seen: set[str] = set()
 
-    def visit(step: Step) -> None:
-        if step.id in done or step.id in visiting:
-            return
-        visiting.add(step.id)
-        for input_id in _step_inputs(step):
-            upstream = by_id.get(input_id)
-            if upstream is not None:
-                visit(upstream)
-        visiting.discard(step.id)
-        done.add(step.id)
-        ordered.append(step)
-
-    for step in steps:
-        visit(step)
+    # Iterative DFS: step chains mirror the workflow's tool chains, which on
+    # big workflows exceed Python's recursion limit (see topological_order).
+    for root in steps:
+        if root.id in seen:
+            continue
+        seen.add(root.id)
+        stack: list[tuple[Step, list[str], int]] = [(root, _step_inputs(root), 0)]
+        while stack:
+            step, inputs, i = stack[-1]
+            descended = False
+            while i < len(inputs):
+                upstream = by_id.get(inputs[i])
+                i += 1
+                if upstream is not None and upstream.id not in seen:
+                    seen.add(upstream.id)
+                    stack[-1] = (step, inputs, i)
+                    stack.append((upstream, _step_inputs(upstream), 0))
+                    descended = True
+                    break
+            if not descended:
+                ordered.append(step)
+                stack.pop()
     return ordered
 
 
@@ -418,11 +530,16 @@ def naive_spec_from_workflow(
         step = converter.step_for_node(node)
         if step is None:
             continue
-        if isinstance(step, JoinStep) and step.use_function:
-            functions_used.add(step.use_function)
         steps.append(step)
 
-    steps = _topological_steps(list(converter.synthetic_reads.values()) + steps)
+    steps = _topological_steps(
+        list(converter.synthetic_reads.values())
+        + steps
+        + list(converter.derived_steps.values())
+    )
+    for step in steps:
+        if isinstance(step, JoinStep) and step.use_function:
+            functions_used.add(step.use_function)
     return PipelineSpec(
         name=workflow.name,
         language="pyspark",

@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 Language = Literal["pyspark", "sql"]
 MedallionLayer = Literal["bronze", "silver", "gold"]
-JoinHow = Literal["inner", "left", "right", "full"]
+JoinHow = Literal["inner", "left", "right", "full", "left_anti"]
 
 
 class ColumnSelection(BaseModel):
