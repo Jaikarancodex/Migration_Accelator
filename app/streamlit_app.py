@@ -42,6 +42,12 @@ from app.flow_ui import (
 from app.offline_convert import naive_spec_from_workflow
 from configs.loader import load_yaml_config
 from configs.models import DeployDefaultsConfig, TargetDefaultsConfig
+from convert.io_map import (
+    apply_source_overrides,
+    spec_io,
+    workflow_sources,
+    workflow_targets,
+)
 from convert.renderer import (
     render_databricks_notebook,
     render_pyspark,
@@ -407,6 +413,70 @@ def _render_artifact_preview(spec: PipelineSpec, artifact_format: ArtifactFormat
                 st.code(summarize_code_correction(rec), language="diff")
 
 
+def _render_io_panel(
+    spec: PipelineSpec,
+    key: str,
+    on_apply: Callable[[PipelineSpec], None],
+) -> None:
+    """Sources & targets of the spec, with an editable real path per source.
+
+    Shows how many sources/targets the workflow has and their names, lets the
+    user bind each source to a real Databricks table, and shows where each
+    source is first consumed downstream — so the placeholder/derived names
+    become real, propagating through every generated artifact.
+    """
+    sources, targets = spec_io(spec)
+    st.markdown(
+        f"**{len(sources)} source(s)** feed this pipeline, writing **{len(targets)} target(s)**."
+    )
+
+    if targets:
+        st.markdown("**Targets (outputs)**")
+        st.dataframe(
+            [
+                {"target table": t.target_table, "mode": t.mode, "from step": t.fed_by}
+                for t in targets
+            ],
+            use_container_width=True, hide_index=True,
+        )
+
+    if not sources:
+        st.caption("This spec has no read steps.")
+        return
+
+    st.markdown("**Sources (inputs)** — set the real table each one should read:")
+    overrides: dict[str, str] = {}
+    placeholder_count = 0
+    for src in sources:
+        is_placeholder = "todo_source_" in src.source_table
+        placeholder_count += is_placeholder
+        label = f"`{src.read_id}` ({src.alias})" + ("  ⚠ placeholder" if is_placeholder else "")
+        overrides[src.read_id] = st.text_input(
+            label, value=src.source_table, key=f"{key}::iosrc::{src.read_id}"
+        )
+        if src.first_consumer is not None:
+            fc = src.first_consumer
+            st.caption(
+                f"↳ first consumed by step `{fc.step_id}` — {fc.detail}; "
+                f"read by {len(src.consumers)} step(s) total."
+            )
+        else:
+            st.caption("↳ not consumed by any step (unused source).")
+
+    if placeholder_count:
+        st.warning(
+            f"{placeholder_count} source(s) are placeholders (todo_source_*) — a custom "
+            "SQL query or an unsupported connector had no real table name. Point them at "
+            "the real table you land that data in."
+        )
+
+    if st.button("Apply source paths", type="primary", key=f"{key}::apply_io"):
+        updated = apply_source_overrides(spec, overrides)
+        on_apply(updated)
+        st.success("Source paths applied — the spec and every generated artifact now use them.")
+        st.rerun()
+
+
 def _offer_auto_repair(
     state_key: str,
     workflow_name: str,
@@ -555,6 +625,26 @@ with tab_quick:
                     f"Parsed **{wf_name}** — {len(workflow.nodes)} tools ready, "
                     f"{len(workflow.unsupported)} need manual follow-up."
                 )
+                w_sources = workflow_sources(workflow)
+                w_targets = workflow_targets(workflow)
+                sc, tc = st.columns(2)
+                sc.metric("Sources (Input tools)", len(w_sources))
+                tc.metric("Targets (Output tools)", len(w_targets))
+                with st.expander("Source & target names"):
+                    st.markdown("**Reads from:**")
+                    st.markdown(
+                        "\n".join(f"- `{tid}` → {name}" for tid, name in w_sources)
+                        or "- (no Input tools — sources appear as placeholders after conversion)"
+                    )
+                    st.markdown("**Writes to:**")
+                    st.markdown(
+                        "\n".join(f"- `{tid}` → {name}" for tid, name in w_targets)
+                        or "- (no Output tools)"
+                    )
+                    st.caption(
+                        "You'll bind each source to a real Databricks table in the "
+                        "Convert step, after conversion."
+                    )
                 st.components.v1.html(
                     workflow_canvas_html(workflow), height=640, scrolling=False
                 )
@@ -635,6 +725,14 @@ with tab_quick:
                             st.success("Spec updated and correction recorded.")
                         except (yaml.YAMLError, ValidationError) as exc:
                             st.error(f"Invalid spec: {exc}")
+
+                with st.expander("Sources & targets — set real table paths", expanded=True):
+                    def _wiz_apply_io(updated: PipelineSpec) -> None:
+                        st.session_state["wiz_spec"] = updated
+                        st.session_state["wiz_spec_yaml"] = _spec_to_yaml(updated)
+                        _clear_code_overrides(updated.name)
+
+                    _render_io_panel(stored_spec, "wiz", _wiz_apply_io)
                 gate_ok = True
 
     # ---- Step 2: Format -------------------------------------------------
@@ -1040,6 +1138,20 @@ with tab_convert:
                     for rec in similar:
                         st.markdown(f"**{rec.workflow_name}** — corrected on {rec.logged_at[:10]}")
                         st.code(summarize_correction(rec), language="diff")
+
+            validated = cast(
+                "PipelineSpec | None", st.session_state.get(f"validated_spec::{selected}")
+            )
+            if validated is not None:
+                with st.expander("Sources & targets — set real table paths", expanded=True):
+                    def _tab_apply_io(updated: PipelineSpec) -> None:
+                        st.session_state[f"validated_spec::{selected}"] = updated
+                        st.session_state[f"spec_yaml::{selected}"] = _spec_to_yaml(updated)
+                        st.session_state[spec_key] = _spec_to_yaml(updated)
+                        _clear_code_overrides(updated.name)
+
+                    _render_io_panel(validated, f"conv::{selected}", _tab_apply_io)
+
             st.caption(
                 "Spec is ready — open the **Generated code** tab to pick Job / Notebook / SDP "
                 "(or ask the LLM to recommend one)."
