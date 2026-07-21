@@ -354,8 +354,51 @@ def _parse_node(
         node.summarize_actions = _parse_summarize(config)
     elif tool_type == ToolType.OUTPUT:
         node.output_path = _text(config.find("File"))
+        node.output_mode = _parse_output_mode(config)
 
     return node
+
+
+_OUTPUT_MODE_KEYS = ("outputmode", "outputoption", "output_option")
+
+
+def _normalize_output_mode(raw: str) -> str | None:
+    """Map an Alteryx Output-Option label onto a WriteStep mode.
+
+    Alteryx spells the option many ways across drivers ('Overwrite Table
+    (Drop)', 'Append to Existing', 'Update; Insert if New'...), so this reads
+    intent from keywords rather than exact strings.
+    """
+    low = raw.lower()
+    if "append" in low:
+        return "append"
+    if "update" in low or "upsert" in low or ("insert" in low and "new" in low):
+        return "merge"
+    if any(k in low for k in ("overwrite", "create", "drop", "delete", "replace")):
+        return "overwrite"
+    return None
+
+
+def _parse_output_mode(config: Element) -> str | None:
+    """Best-effort read of the Output tool's write mode from its config tree.
+
+    Scans every element/attribute whose name looks like an output-option
+    field (the exact tag differs by output driver) and returns the first
+    recognizable mode; None when nothing matches (converter defaults to
+    overwrite, the safe full-refresh choice).
+    """
+    for elem in config.iter():
+        tag = elem.tag.rsplit("}", 1)[-1].lower()  # strip any XML namespace
+        if any(key in tag for key in _OUTPUT_MODE_KEYS) and elem.text and elem.text.strip():
+            mode = _normalize_output_mode(elem.text)
+            if mode:
+                return mode
+        for attr_name, attr_val in elem.attrib.items():
+            if any(key in attr_name.lower() for key in _OUTPUT_MODE_KEYS) and attr_val.strip():
+                mode = _normalize_output_mode(attr_val)
+                if mode:
+                    return mode
+    return None
 
 
 def _iter_node_elements(parent: Element) -> Iterator[Element]:

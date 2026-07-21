@@ -143,6 +143,7 @@ class Node(BaseModel):
     )
     summarize_actions: list[SummarizeAction] = Field(default_factory=list)  # SUMMARIZE
     output_path: str | None = None  # OUTPUT
+    output_mode: str | None = None  # OUTPUT: "overwrite" | "append" | "merge" (from Output Option)
 
     annotation: str | None = None
     position: dict[str, float] = Field(default_factory=dict)

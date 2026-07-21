@@ -16,6 +16,7 @@ Real-workflow behaviors:
 from __future__ import annotations
 
 import re
+from typing import Literal, cast
 
 from convert.spec import (
     AggregateStep,
@@ -46,7 +47,11 @@ from convert.spec import (
 )
 from ingest.alteryx.ir import Node, ToolType, Workflow
 
-_AGG_FUNC_MAP = {"sum": "sum", "count": "count", "avg": "avg", "min": "min", "max": "max"}
+_AGG_FUNC_MAP = {
+    "sum": "sum", "count": "count", "avg": "avg", "min": "min", "max": "max",
+    "first": "first", "last": "last", "stddev": "stddev", "std": "stddev",
+    "var": "variance", "variance": "variance", "countdistinct": "countDistinct",
+}
 
 _UC_IDENTIFIER = re.compile(r"[A-Za-z0-9_]+(\.[A-Za-z0-9_]+){1,2}")
 _SQL_HINT = re.compile(r"\bselect\b.+\bfrom\b", re.IGNORECASE | re.DOTALL)
@@ -495,11 +500,14 @@ class _Converter:
 
         if node.tool_type == ToolType.OUTPUT:
             table = _sanitize_table_name(node.output_path or node.tool_id)
+            mode = cast(
+                "Literal['overwrite', 'append', 'merge']", node.output_mode or "overwrite"
+            )
             return WriteStep(
                 id=node.tool_id,
                 input=self._input_id(node),
                 target_table=f"{target.catalog}.{target.schema_}.{table}",
-                mode="overwrite",
+                mode=mode,
             )
 
         return None

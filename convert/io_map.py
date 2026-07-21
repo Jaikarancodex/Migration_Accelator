@@ -95,6 +95,11 @@ class TargetBinding(BaseModel):
     mode: str
     fed_by: str
 
+    @property
+    def refresh_type(self) -> str:
+        """How the target refreshes: full (overwrite) vs incremental (append/merge)."""
+        return "full" if self.mode == "overwrite" else "incremental"
+
 
 def spec_io(spec: PipelineSpec) -> tuple[list[SourceBinding], list[TargetBinding]]:
     """Sources (with consumers, in spec order) and targets of a spec."""

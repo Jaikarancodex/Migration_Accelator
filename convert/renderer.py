@@ -295,7 +295,10 @@ def _render_distinct(step: DistinctStep) -> str:
     return f"{_var(step.id)} = {_var(step.input)}.dropDuplicates()"
 
 
-_AGG_FUNCS = {"sum", "count", "avg", "min", "max"}
+_AGG_FUNCS = {
+    "sum", "count", "avg", "min", "max",
+    "first", "last", "stddev", "variance", "countDistinct",
+}
 
 
 def _render_aggregate(step: AggregateStep) -> str:
@@ -749,6 +752,24 @@ def render_sdp(spec: PipelineSpec) -> str:
         else:
             body = [f'return spark.read.table("{silver}")']
         parts.append(_dp_table(gold, comment, body, table_properties=col_props))
+        if write.mode in ("append", "merge"):
+            # Alteryx ran this output incrementally. A materialized view is a
+            # full refresh; converting to a streaming table (or apply_changes
+            # for upsert) is only correct when the source is append-only, which
+            # we can't assume here — so flag it rather than silently generate
+            # streaming code against a batch source.
+            kind = "append (incremental)" if write.mode == "append" else "update/upsert (CDC)"
+            hint = (
+                "if its source is append-only, make this a streaming table "
+                "(spark.readStream.table(...))"
+                if write.mode == "append"
+                else "if its source is a change feed, use dp.create_streaming_table + "
+                "dp.apply_changes for the upsert"
+            )
+            parts.append(
+                f"\n# REVIEW: {write.target_table} used Alteryx {kind} output; this renders "
+                f"as a full-refresh materialized view. {hint[0].upper()}{hint[1:]}."
+            )
 
     orphaned = [s.id for s in gold_steps if s.id not in reachable]
     if orphaned:

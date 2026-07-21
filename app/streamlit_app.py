@@ -434,11 +434,22 @@ def _render_io_panel(
         st.markdown("**Targets (outputs)**")
         st.dataframe(
             [
-                {"target table": t.target_table, "mode": t.mode, "from step": t.fed_by}
+                {
+                    "target table": t.target_table,
+                    "refresh": t.refresh_type,
+                    "mode": t.mode,
+                    "from step": t.fed_by,
+                }
                 for t in targets
             ],
             use_container_width=True, hide_index=True,
         )
+        if any(t.refresh_type == "incremental" for t in targets):
+            st.caption(
+                "⚠ Incremental target(s) detected — the generated code marks these with a "
+                "`# REVIEW` note: they render as full-refresh materialized views, and become "
+                "streaming tables / apply_changes only if their source is append-only."
+            )
 
     if not sources:
         st.caption("This spec has no read steps.")
