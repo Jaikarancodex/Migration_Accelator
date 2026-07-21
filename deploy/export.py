@@ -56,16 +56,21 @@ def export_bundle_from_spec(
     workspace_host: str,
     artifact_format: ArtifactFormat = "notebook",
     bundle_name: str | None = None,
+    main_code_override: str | None = None,
 ) -> Path:
     """Render a validated spec and write a deployable bundle directory.
 
     The bundle name defaults to the pipeline name — bundle names are the
     deployment-state key, so two workflows sharing one name would replace
     each other's resources on deploy.
+
+    `main_code_override` deploys a human-edited main artifact instead of the
+    rendered one (the app's manual code editor); the utility module and
+    databricks.yml still come from the spec.
     """
     if bundle_name is None:
         bundle_name = re.sub(r"\W+", "_", spec.name).strip("_").lower()
-    code = _RENDERERS[artifact_format](spec)
+    code = main_code_override or _RENDERERS[artifact_format](spec)
 
     # The artifact filename becomes a Databricks workspace path; keep it free
     # of spaces and other characters that break notebook/file paths.

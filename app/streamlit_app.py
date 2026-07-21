@@ -62,13 +62,17 @@ from deploy.dbsql import (
 from deploy.export import deploy_bundle, export_bundle_from_spec, run_bundle_job
 from deploy.gitops import GitError, commit_and_push, repo_info, set_remote
 from feedback.store import (
+    code_correction_count,
     correction_count,
     correction_counts_by_tool,
     deploy_error_counts_by_stage,
+    find_code_corrections,
     find_similar_corrections,
+    log_code_correction,
     log_conversion_triple,
     log_deploy_error,
     recent_deploy_errors,
+    summarize_code_correction,
     summarize_correction,
 )
 from ingest.alteryx.ir import ToolType
@@ -296,6 +300,16 @@ _ARTIFACT_RENDERERS = {
 }
 
 
+def _clear_code_overrides(workflow_name: str) -> None:
+    """Drop manual code edits when the spec they were made against changes.
+
+    A regenerated/edited/repaired spec renders different code; silently
+    deploying stale hand-edits over it would undo the spec change.
+    """
+    for fmt in FORMAT_ORDER:
+        st.session_state.pop(f"code_override::{workflow_name}::{fmt}", None)
+
+
 def _render_artifact_preview(spec: PipelineSpec, artifact_format: ArtifactFormat, key: str) -> None:
     """Show the generated main file, plus its utility file as a second tab if one exists.
 
@@ -305,6 +319,9 @@ def _render_artifact_preview(spec: PipelineSpec, artifact_format: ArtifactFormat
     """
     main_code = _ARTIFACT_RENDERERS[artifact_format](spec)
     utility_code = render_utility_module(spec)
+    override_key = f"code_override::{spec.name}::{artifact_format}"
+    override = st.session_state.get(override_key)
+    deployed_code = override or main_code
 
     # The renderer marks anything it could not translate with certainty
     # (unknown Alteryx functions, approximated silver-chain reads, name
@@ -312,26 +329,82 @@ def _render_artifact_preview(spec: PipelineSpec, artifact_format: ArtifactFormat
     # the exact lines a reviewer must check before trusting the code.
     review_lines = [
         line.strip()
-        for line in (main_code + "\n" + (utility_code or "")).splitlines()
+        for line in (deployed_code + "\n" + (utility_code or "")).splitlines()
         if "REVIEW" in line
     ]
     if review_lines:
         st.warning(
-            f"{len(review_lines)} line(s) flagged REVIEW — verify these before deploying."
+            f"{len(review_lines)} line(s) flagged REVIEW — verify these before deploying, "
+            "or fix them in the manual editor below."
         )
         with st.expander("Show flagged lines"):
             st.code("\n".join(review_lines), language="python")
 
+    if override:
+        st.info(
+            "Manual code edits are active for this format — deploys use your "
+            "edited version, not the regenerated one."
+        )
+        if st.button("Discard manual edits", key=f"{key}::discard::{artifact_format}"):
+            st.session_state.pop(override_key, None)
+            st.rerun()
+
     if utility_code is None:
-        st.code(main_code, language="python")
-        return
-    module = utils_module_name(spec)
-    tab_main, tab_util = st.tabs([f"{module.rsplit('_utils', 1)[0]} (main)", f"{module}.py"])
-    with tab_main:
-        st.code(main_code, language="python")
-    with tab_util:
-        st.caption("Cleanse/macro helpers — imported by the main file, deployed alongside it.")
-        st.code(utility_code, language="python")
+        st.code(deployed_code, language="python")
+    else:
+        module = utils_module_name(spec)
+        tab_main, tab_util = st.tabs(
+            [f"{module.rsplit('_utils', 1)[0]} (main)", f"{module}.py"]
+        )
+        with tab_main:
+            st.code(deployed_code, language="python")
+        with tab_util:
+            st.caption(
+                "Cleanse/macro helpers — imported by the main file, deployed alongside it."
+            )
+            st.code(utility_code, language="python")
+
+    with st.expander("Edit code manually & train"):
+        st.caption(
+            "Fix anything directly in the code — deploys for this format use your "
+            "version, and the edit is logged as a correction. Prefer editing the "
+            "spec when the fix is expressible there (spec fixes feed the LLM "
+            "directly and survive regeneration; code edits are cleared when the "
+            "spec is regenerated)."
+        )
+        edited_code = st.text_area(
+            "generated code",
+            value=deployed_code,
+            height=380,
+            key=f"{key}::editor::{artifact_format}",
+            label_visibility="collapsed",
+        )
+        if st.button(
+            "Save code edits & train", type="primary",
+            key=f"{key}::save_code::{artifact_format}",
+        ):
+            try:
+                compile(edited_code.replace("# Databricks notebook source", ""), "<edited>", "exec")
+            except SyntaxError as exc:
+                st.error(f"Not valid Python — fix before saving: {exc}")
+            else:
+                if edited_code.strip() == main_code.strip():
+                    st.session_state.pop(override_key, None)
+                    st.success("Code matches the generated version — nothing to record.")
+                else:
+                    st.session_state[override_key] = edited_code
+                    log_code_correction(spec.name, artifact_format, main_code, edited_code)
+                    st.success(
+                        "Code edits saved and logged — deploys now use your version."
+                    )
+                st.rerun()
+
+    past_edits = find_code_corrections(spec.name, artifact_format)
+    if past_edits:
+        with st.expander(f"Past manual code edits for this workflow ({len(past_edits)})"):
+            for rec in past_edits:
+                st.markdown(f"`{rec.logged_at[:16]}` — {rec.artifact_format}")
+                st.code(summarize_code_correction(rec), language="diff")
 
 
 def _offer_auto_repair(
@@ -377,6 +450,7 @@ def _offer_auto_repair(
         if st.button("Apply repaired spec", type="primary", key=f"repair_apply::{state_key}"):
             repaired_spec = PipelineSpec.model_validate(yaml.safe_load(repaired_yaml))
             apply_repair(repaired_spec, repaired_yaml)
+            _clear_code_overrides(repaired_spec.name)
             log_conversion_triple(
                 workflow_name=workflow_name,
                 tool_types=tool_types,
@@ -523,6 +597,7 @@ with tab_quick:
                 # the human correction against what was actually generated.
                 st.session_state["wiz_spec_yaml_generated"] = spec_yaml
                 st.session_state["wiz_tool_types"] = [n.tool_type.value for n in workflow.nodes]
+                _clear_code_overrides(spec.name)
                 _wiz_reset_from(1)
                 st.rerun()
 
@@ -550,6 +625,7 @@ with tab_quick:
                             revalidated = PipelineSpec.model_validate(yaml.safe_load(edited))
                             st.session_state["wiz_spec"] = revalidated
                             st.session_state["wiz_spec_yaml"] = edited
+                            _clear_code_overrides(revalidated.name)
                             log_conversion_triple(
                                 workflow_name=st.session_state["wiz_wf"],
                                 tool_types=st.session_state.get("wiz_tool_types", []),
@@ -628,7 +704,12 @@ with tab_quick:
 
                     dstages[0] = "running"
                     _dflow()
-                    export_bundle_from_spec(spec, bundle_dir, workspace_host=wiz_host, artifact_format=fmt)
+                    export_bundle_from_spec(
+                        spec, bundle_dir, workspace_host=wiz_host, artifact_format=fmt,
+                        main_code_override=st.session_state.get(
+                            f"code_override::{spec.name}::{fmt}"
+                        ),
+                    )
                     dstages[0] = "done"
                     dstages[1] = "running"
                     _dflow()
@@ -848,6 +929,12 @@ with tab_repo:
                     )
                 else:
                     st.caption("No failures recorded.")
+            n_code_edits = code_correction_count()
+            if n_code_edits:
+                st.caption(
+                    f"**{n_code_edits} manual code edit(s)** logged — recurring code-level "
+                    "fixes point at renderer gaps worth closing in convert/renderer.py."
+                )
             for err in recent_deploy_errors(limit=3):
                 st.caption(
                     f"`{err.logged_at[:16]}` **{err.workflow_name}** ({err.stage}): "
@@ -905,6 +992,7 @@ with tab_convert:
                 # the Generated code tab (format picker + render) works
                 # immediately; re-validation is only needed after manual edits.
                 st.session_state[f"validated_spec::{selected}"] = spec
+                _clear_code_overrides(spec.name)
             except SpecGenerationError as exc:
                 st.error(str(exc))
 
@@ -918,6 +1006,7 @@ with tab_convert:
                     data = yaml.safe_load(edited)
                     validated_spec = PipelineSpec.model_validate(data)
                     st.session_state[f"validated_spec::{selected}"] = validated_spec
+                    _clear_code_overrides(validated_spec.name)
                     generated_yaml = st.session_state.get(f"{spec_key}::generated")
                     trained = False
                     if generated_yaml is not None and generated_yaml.strip() != edited.strip():
@@ -1258,6 +1347,9 @@ with tab_deploy:
                             workspace_host=deploy_host,
                             artifact_format=artifact_format,
                             bundle_name=bundle_name,
+                            main_code_override=st.session_state.get(
+                                f"code_override::{deploy_spec.name}::{artifact_format}"
+                            ),
                         )
                     with st.spinner(f"Deploying to {deploy_host} ..."):
                         ok, log = deploy_bundle(bundle_dir, deploy_host, token)

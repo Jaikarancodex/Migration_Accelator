@@ -104,3 +104,29 @@ def test_correction_count(tmp_path: Path) -> None:
     log_conversion_triple("a", ["filter"], "x", "y", store_path=store)
     log_conversion_triple("b", ["join"], "x", "z", store_path=store)
     assert correction_count(store_path=store) == 2
+
+
+def test_code_corrections_log_find_and_noop(tmp_path: Path) -> None:
+    from feedback.store import (
+        code_correction_count,
+        find_code_corrections,
+        log_code_correction,
+        summarize_code_correction,
+    )
+
+    store = tmp_path / "code.jsonl"
+    log_code_correction("wf", "sdp", "a = 1", "a = 1", store_path=store)  # no-op edit
+    assert code_correction_count(store_path=store) == 0
+
+    log_code_correction("wf", "sdp", "a = 1", "a = 2", store_path=store)
+    log_code_correction("wf", "job", "b = 1", "b = 2", store_path=store)
+    log_code_correction("other", "sdp", "c = 1", "c = 2", store_path=store)
+
+    assert code_correction_count(store_path=store) == 3
+    sdp_edits = find_code_corrections("wf", "sdp", store_path=store)
+    assert len(sdp_edits) == 1
+    assert "-a = 1" in summarize_code_correction(sdp_edits[0])
+    assert "+a = 2" in summarize_code_correction(sdp_edits[0])
+    # format=None returns this workflow's edits across formats, newest first
+    all_wf = find_code_corrections("wf", store_path=store)
+    assert [r.artifact_format for r in all_wf] == ["job", "sdp"]

@@ -107,3 +107,20 @@ def test_deploy_error_log_appends_records(tmp_path: Path) -> None:
     assert first.logged_at
     second = DeployErrorRecord.model_validate_json(lines[1])
     assert len(second.message) == 4000  # truncated, not unbounded CLI output
+
+
+def test_export_honors_main_code_override(tmp_path: Path) -> None:
+    """A human-edited main artifact deploys in place of the rendered one; the
+    utility module and databricks.yml still come from the spec.
+    """
+    spec = _spec_with_cleanse(tmp_path)
+    out = export_bundle_from_spec(
+        spec, tmp_path / "bundle_override",
+        workspace_host="https://x.cloud.databricks.com",
+        artifact_format="job",
+        main_code_override="# human-edited version\nprint('fixed by hand')\n",
+    )
+    main_file = out / "src" / "cleanse_flow.py"
+    assert main_file.read_text(encoding="utf-8").startswith("# human-edited version")
+    assert (out / "src" / "cleanse_flow_utils.py").exists()
+    assert (out / "databricks.yml").exists()

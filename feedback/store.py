@@ -22,6 +22,9 @@ _DEFAULT_STORE = Path(__file__).resolve().parent.parent / "migration_repo_output
 _DEFAULT_ERROR_STORE = (
     Path(__file__).resolve().parent.parent / "migration_repo_output" / "deploy_errors.jsonl"
 )
+_DEFAULT_CODE_STORE = (
+    Path(__file__).resolve().parent.parent / "migration_repo_output" / "code_corrections.jsonl"
+)
 
 
 class ConversionRecord(BaseModel):
@@ -131,6 +134,97 @@ def find_similar_corrections(
     scored = [(score, r) for score, r in scored if score > 0]
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [r for _, r in scored[:limit]]
+
+
+class CodeCorrectionRecord(BaseModel):
+    """One manual edit made to *generated code* (not the spec) before deploy.
+
+    Spec corrections are what the LLM retrieval loop feeds on (the LLM emits
+    specs, so spec diffs are directly reusable in its prompt). Code edits are
+    the layer below — logged so nothing a human fixed is ever lost, surfaced
+    back to reviewers the next time the same workflow is converted, and
+    counted in the learning log so recurring code-level fixes show up as
+    renderer gaps worth closing.
+    """
+
+    workflow_name: str
+    artifact_format: str  # "job" | "notebook" | "sdp"
+    generated_code: str
+    edited_code: str
+    logged_at: str = ""
+
+    def model_post_init(self, __context: object) -> None:
+        if not self.logged_at:
+            self.logged_at = datetime.now(UTC).isoformat()
+
+
+def log_code_correction(
+    workflow_name: str,
+    artifact_format: str,
+    generated_code: str,
+    edited_code: str,
+    store_path: Path | None = None,
+) -> None:
+    """Append one manual code edit. No-ops when nothing actually changed."""
+    if edited_code.strip() == generated_code.strip():
+        return
+    path = store_path or _DEFAULT_CODE_STORE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = CodeCorrectionRecord(
+        workflow_name=workflow_name,
+        artifact_format=artifact_format,
+        generated_code=generated_code,
+        edited_code=edited_code,
+    )
+    with path.open("a", encoding="utf-8") as f:
+        f.write(record.model_dump_json() + "\n")
+
+
+def _load_code_records(store_path: Path | None = None) -> list[CodeCorrectionRecord]:
+    path = store_path or _DEFAULT_CODE_STORE
+    if not path.exists():
+        return []
+    return [
+        CodeCorrectionRecord.model_validate_json(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def find_code_corrections(
+    workflow_name: str,
+    artifact_format: str | None = None,
+    limit: int = 3,
+    store_path: Path | None = None,
+) -> list[CodeCorrectionRecord]:
+    """Past manual code edits for this workflow (newest first)."""
+    matches = [
+        r
+        for r in _load_code_records(store_path)
+        if r.workflow_name == workflow_name
+        and (artifact_format is None or r.artifact_format == artifact_format)
+    ]
+    return matches[-limit:][::-1]
+
+
+def code_correction_count(store_path: Path | None = None) -> int:
+    return len(_load_code_records(store_path))
+
+
+def summarize_code_correction(record: CodeCorrectionRecord, max_lines: int = 24) -> str:
+    """A short unified diff of the manual code edit, for reviewer hints."""
+    diff = list(
+        difflib.unified_diff(
+            record.generated_code.splitlines(),
+            record.edited_code.splitlines(),
+            lineterm="",
+            n=1,
+        )
+    )
+    body = "\n".join(diff[:max_lines])
+    if len(diff) > max_lines:
+        body += "\n... (truncated)"
+    return body
 
 
 def _load_error_records(store_path: Path | None = None) -> list[DeployErrorRecord]:
