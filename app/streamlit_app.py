@@ -358,7 +358,9 @@ with tab_quick:
                     f"Parsed **{wf_name}** — {len(workflow.nodes)} tools ready, "
                     f"{len(workflow.unsupported)} need manual follow-up."
                 )
-                st.markdown(workflow_canvas_html(workflow), unsafe_allow_html=True)
+                st.components.v1.html(
+                    workflow_canvas_html(workflow), height=640, scrolling=False
+                )
                 missing = [
                     m for m in workflow.referenced_macros()
                     if m not in repo_cache.list_macro_names(_repo())
@@ -623,7 +625,9 @@ with tab_repo:
         if macros_used:
             st.caption(f"References {macros_used} macro(s): {', '.join(canvas_wf.referenced_macros())}")
 
-        st.markdown(workflow_canvas_html(canvas_wf), unsafe_allow_html=True)
+        # components.html (iframe) rather than st.markdown: the canvas ships
+        # its own pan/zoom script, and st.markdown never executes <script>.
+        st.components.v1.html(workflow_canvas_html(canvas_wf), height=640, scrolling=False)
 
         with st.expander("Repo metadata"):
             st.dataframe(

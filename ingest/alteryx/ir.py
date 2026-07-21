@@ -161,6 +161,7 @@ class UnsupportedTool(BaseModel):
     plugin: str
     reason: str
     upstream_ids: list[str] = Field(default_factory=list)
+    position: dict[str, float] = Field(default_factory=dict)
 
 
 class Workflow(BaseModel):

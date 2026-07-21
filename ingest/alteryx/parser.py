@@ -309,6 +309,7 @@ def _parse_node(
             plugin=plugin,
             reason="No <Configuration> found" if config is None else "Unrecognized plugin type",
             upstream_ids=connections.get(tool_id, []),
+            position=_parse_position(gui_settings),
         )
 
     node = Node(
