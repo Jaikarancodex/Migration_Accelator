@@ -107,6 +107,45 @@ def test_render_with_columns_chains_withcolumn() -> None:
     assert 'df_with_total.withColumn("LineTotal", F.expr(\'`Amount` * `Quantity`\'))' in source
 
 
+def test_render_filter_flags_unrecognized_function_for_review() -> None:
+    spec = PipelineSpec(
+        name="flagged", language="pyspark", source=SOURCE, target=TARGET,
+        steps=[
+            ReadStep(id="r", source_table="t", alias="t"),
+            FilterStep(id="f", input="r", condition='DateTimeDiff([A],[B],"DAY") > 0'),
+            WriteStep(id="w", input="f", target_table="main.x.flagged"),
+        ],
+    )
+    source = render_pyspark(spec)
+    filter_line = next(line for line in source.splitlines() if "df_f = df_r.filter" in line)
+    assert "# REVIEW: verify" in filter_line
+    assert "DateTimeDiff" in filter_line
+
+
+def test_render_filter_no_review_comment_for_known_functions() -> None:
+    source = render_pyspark(_full_spec())
+    filter_line = next(line for line in source.splitlines() if "df_positive = " in line)
+    assert "REVIEW" not in filter_line
+
+
+def test_render_with_columns_flags_unrecognized_function_for_review() -> None:
+    spec = PipelineSpec(
+        name="flagged", language="pyspark", source=SOURCE, target=TARGET,
+        steps=[
+            ReadStep(id="r", source_table="t", alias="t"),
+            WithColumnsStep(
+                id="w1", input="r",
+                columns=[ComputedColumn(name="Next", expression='DateTimeAdd([A],3,"FORTNIGHT")')],
+            ),
+            WriteStep(id="w", input="w1", target_table="main.x.flagged"),
+        ],
+    )
+    source = render_pyspark(spec)
+    with_columns_line = next(line for line in source.splitlines() if '"Next"' in line)
+    assert "# REVIEW: verify" in with_columns_line
+    assert "DateTimeAdd" in with_columns_line
+
+
 def test_render_join_uses_safe_join_function() -> None:
     source = render_pyspark(_full_spec())
     assert "safe_join(df_with_total, df_raw_customers" in source

@@ -49,6 +49,37 @@ _BLOCK_IF = re.compile(r"\bIF\b", re.IGNORECASE)
 _BLOCK_ELSEIF = re.compile(r"\bELSEIF\b", re.IGNORECASE)
 _BLOCK_ENDIF = re.compile(r"\bENDIF\b", re.IGNORECASE)
 
+# Functions verified to exist in Spark/Databricks SQL with the same call
+# shape and semantics as their Alteryx formula-language namesake (case
+# differences aside), so leaving them untouched is safe. Anything NOT in
+# this set that still looks like a function call after translation is
+# either a genuine gap in this module or a name that happens to collide
+# with something else in Spark — either way, `unknown_functions` flags it
+# rather than betting on a silent guess.
+_KNOWN_SAFE_FUNCTIONS: frozenset[str] = frozenset({
+    # rename targets, already Spark-native once _rename_functions runs
+    "if", "string", "double", "month", "year", "day", "hour",
+    "current_timestamp", "current_date", "upper", "lower", "initcap",
+    "ltrim", "rtrim", "regexp_replace", "rlike",
+    # Alteryx names that pass through unchanged and match a Spark/Databricks
+    # SQL builtin of the same name and call shape
+    "trim", "length", "left", "right", "substring", "replace", "isnull",
+    "contains", "startswith", "endswith", "coalesce", "concat", "isnan",
+    "round", "abs", "ceil", "floor", "sqrt", "power", "mod", "nullif",
+    "cast", "greatest", "least", "now", "date", "to_date", "to_timestamp",
+    "date_format", "datediff", "date_add", "date_sub", "dateadd",
+    "regexp_extract", "split", "array", "size", "sum", "count", "avg",
+    "min", "max", "distinct", "in", "like", "between", "exists",
+    # SQL keywords that can appear immediately before "(" in generated text
+    "case", "when", "then", "else", "end", "and", "or", "not", "is",
+})
+
+_CALL_NAME = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+_DATE_UNITS = {
+    "year", "quarter", "month", "week", "day", "hour", "minute", "second",
+}
+
 
 def _rename_functions(expr: str) -> str:
     for alteryx_name, spark_name in _FUNC_RENAMES.items():
@@ -95,6 +126,32 @@ def _find_call(expr: str, func_lower: str, start: int = 0) -> tuple[int, int, li
             current += ch
         i += 1
     return None
+
+
+def _rewrite_datetimeadd(expr: str) -> str:
+    """Alteryx DateTimeAdd(date, n, "unit") -> Databricks SQL dateadd(unit, n, date).
+
+    Databricks's `dateadd` takes the unit as a bare keyword (not a string
+    literal) and in the opposite argument order. Only rewritten when the
+    unit is a literal we recognize (YEAR/MONTH/DAY/...); anything else is
+    left as-is so `unknown_functions` flags it for review instead of this
+    guessing at an unfamiliar shape.
+    """
+    search_from = 0
+    while (found := _find_call(expr, "datetimeadd", search_from)) is not None:
+        start, end, args = found
+        if len(args) == 3:
+            unit_match = re.fullmatch(r"""['"]\s*(\w+)\s*['"]""", args[2].strip())
+            unit = unit_match.group(1).lower() if unit_match else ""
+        else:
+            unit = ""
+        if unit in _DATE_UNITS:
+            replacement = f"dateadd({unit.upper()}, {args[1]}, {args[0]})"
+            expr = f"{expr[:start]}{replacement}{expr[end:]}"
+            search_from = start + len(replacement)
+        else:
+            search_from = end
+    return expr
 
 
 def _rewrite_isempty(expr: str) -> str:
@@ -167,9 +224,22 @@ def alteryx_expr_to_spark(expression: str) -> str:
     expr = _NULL_CALL.sub("NULL", expr)
     expr = _rewrite_block_if(expr)
     expr = _rename_functions(expr)
+    expr = _rewrite_datetimeadd(expr)
     expr = _rewrite_isempty(expr)
     expr = _rewrite_substring(expr)
     expr = _rewrite_string_concat(expr)
     expr = _EQ_NULL.sub("IS NULL", expr)
     expr = _NE_NULL.sub("IS NOT NULL", expr)
     return expr
+
+
+def unknown_functions(expr: str) -> set[str]:
+    """Function calls left in `expr` that aren't a verified-safe builtin.
+
+    An unrecognized name either fails loudly at pipeline run time (the good
+    case) or, worse, happens to collide with an unrelated Spark builtin and
+    silently computes the wrong thing. Both are worth a human's eyes before
+    the generated code is trusted, so callers surface this as a REVIEW
+    comment rather than a translation guess.
+    """
+    return {name for name in _CALL_NAME.findall(expr) if name.lower() not in _KNOWN_SAFE_FUNCTIONS}

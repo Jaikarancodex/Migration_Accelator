@@ -11,7 +11,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from convert.expr import alteryx_expr_to_spark
+from convert.expr import alteryx_expr_to_spark, unknown_functions
 from convert.spec import (
     AggregateStep,
     AppendFieldsStep,
@@ -67,16 +67,29 @@ def _render_select(step: SelectStep) -> str:
     return f"{_var(step.id)} = {_var(step.input)}.select({cols})"
 
 
+def _review_suffix(expr: str) -> str:
+    unknown = unknown_functions(expr)
+    if not unknown:
+        return ""
+    return f"  # REVIEW: verify {sorted(unknown)} translate correctly to Spark SQL"
+
+
 def _render_filter(step: FilterStep) -> str:
     condition = alteryx_expr_to_spark(step.condition)
-    return f"{_var(step.id)} = {_var(step.input)}.filter(F.expr({condition!r}))"
+    return (
+        f"{_var(step.id)} = {_var(step.input)}.filter(F.expr({condition!r}))"
+        f"{_review_suffix(condition)}"
+    )
 
 
 def _render_with_columns(step: WithColumnsStep) -> str:
     lines = [f"{_var(step.id)} = {_var(step.input)}"]
     for col in step.columns:
         expr = alteryx_expr_to_spark(col.expression)
-        lines.append(f'{_var(step.id)} = {_var(step.id)}.withColumn("{col.name}", F.expr({expr!r}))')
+        lines.append(
+            f'{_var(step.id)} = {_var(step.id)}.withColumn("{col.name}", F.expr({expr!r}))'
+            f"{_review_suffix(expr)}"
+        )
     return "\n".join(lines)
 
 
