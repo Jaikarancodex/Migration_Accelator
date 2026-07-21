@@ -133,6 +133,43 @@ def find_similar_corrections(
     return [r for _, r in scored[:limit]]
 
 
+def _load_error_records(store_path: Path | None = None) -> list[DeployErrorRecord]:
+    path = store_path or _DEFAULT_ERROR_STORE
+    if not path.exists():
+        return []
+    return [
+        DeployErrorRecord.model_validate_json(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def correction_counts_by_tool(store_path: Path | None = None) -> dict[str, int]:
+    """How often each Alteryx tool type appears in human-corrected conversions.
+
+    The empirical 'which tools does the converter get wrong' signal: a tool
+    type that keeps showing up here is where converter work pays off most.
+    """
+    counts: dict[str, int] = {}
+    for record in _load_records(store_path):
+        for tool in set(record.tool_types):
+            counts[tool] = counts.get(tool, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: kv[1], reverse=True))
+
+
+def deploy_error_counts_by_stage(store_path: Path | None = None) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in _load_error_records(store_path):
+        counts[record.stage] = counts.get(record.stage, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: kv[1], reverse=True))
+
+
+def recent_deploy_errors(
+    limit: int = 5, store_path: Path | None = None
+) -> list[DeployErrorRecord]:
+    return _load_error_records(store_path)[-limit:][::-1]
+
+
 def summarize_correction(record: ConversionRecord, max_lines: int = 16) -> str:
     """A short unified diff between the generated and corrected spec, for prompts."""
     diff = list(

@@ -13,10 +13,12 @@ Run with: streamlit run app/streamlit_app.py
 
 from __future__ import annotations
 
+import difflib
 import os
 import re
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -59,7 +61,15 @@ from deploy.dbsql import (
 )
 from deploy.export import deploy_bundle, export_bundle_from_spec, run_bundle_job
 from deploy.gitops import GitError, commit_and_push, repo_info, set_remote
-from feedback.store import log_conversion_triple, log_deploy_error
+from feedback.store import (
+    correction_counts_by_tool,
+    deploy_error_counts_by_stage,
+    find_similar_corrections,
+    log_conversion_triple,
+    log_deploy_error,
+    recent_deploy_errors,
+    summarize_correction,
+)
 from ingest.alteryx.ir import ToolType
 from ingest.alteryx.parser import parse_yxmd
 from knowledge.alteryx_tools import lookup_by_plugin
@@ -71,6 +81,7 @@ from llm.recommend import (
     heuristic_recommendation,
     recommend_deployment_format,
 )
+from llm.repair import repair_pipeline_spec
 from repo.graph import CyclicDependencyError, DependencyGraph
 from repo.store import MigrationRepo
 
@@ -266,6 +277,61 @@ def _render_artifact_preview(spec: PipelineSpec, artifact_format: ArtifactFormat
         st.code(utility_code, language="python")
 
 
+def _offer_auto_repair(
+    state_key: str,
+    workflow_name: str,
+    spec_yaml: str,
+    stage: str,
+    tool_types: list[str],
+    apply_repair: Callable[[PipelineSpec, str], None],
+) -> None:
+    """After a Databricks failure, offer a one-click LLM repair of the spec.
+
+    The failure output is stored under `state_key`; the repaired spec is
+    shown as a diff for human review, and applying it both swaps the spec in
+    and logs the broken->repaired pair as a correction so the retrieval loop
+    learns from it.
+    """
+    error_text = st.session_state.get(state_key)
+    if not error_text or not spec_yaml:
+        return
+    if not has_key:
+        st.caption(
+            "Set ANTHROPIC_API_KEY to enable one-click AI repair of this failure."
+        )
+        return
+    if st.button("Attempt AI repair", key=f"repair_btn::{state_key}"):
+        try:
+            with st.spinner("Asking the LLM for a minimal fix..."):
+                repaired = repair_pipeline_spec(
+                    AnthropicLLMClient(), spec_yaml, error_text, workflow_name, stage=stage
+                )
+            st.session_state[f"{state_key}::repaired"] = _spec_to_yaml(repaired)
+        except SpecGenerationError as exc:
+            st.error(str(exc))
+    repaired_yaml = st.session_state.get(f"{state_key}::repaired")
+    if repaired_yaml:
+        diff_lines = list(
+            difflib.unified_diff(
+                spec_yaml.splitlines(), repaired_yaml.splitlines(), lineterm="", n=2
+            )
+        )
+        st.code("\n".join(diff_lines[:80]) or "(no changes proposed)", language="diff")
+        if st.button("Apply repaired spec", type="primary", key=f"repair_apply::{state_key}"):
+            repaired_spec = PipelineSpec.model_validate(yaml.safe_load(repaired_yaml))
+            apply_repair(repaired_spec, repaired_yaml)
+            log_conversion_triple(
+                workflow_name=workflow_name,
+                tool_types=tool_types,
+                generated_spec_yaml=spec_yaml,
+                corrected_spec_yaml=repaired_yaml,
+            )
+            st.session_state.pop(state_key, None)
+            st.session_state.pop(f"{state_key}::repaired", None)
+            st.success("Repaired spec applied and logged — redeploy to verify the fix.")
+            st.rerun()
+
+
 def _push_bundle_to_git(bundle_dir: Path, workflow_name: str) -> None:
     """Commit and push a generated bundle dir if git integration is enabled."""
     if not git_enabled:
@@ -412,12 +478,17 @@ with tab_quick:
                         if stored_spec.macros else "."
                     )
                 )
-                with st.expander("Review / edit the pipeline spec (YAML)"):
+                with st.expander("Review / edit the pipeline spec (YAML)", expanded=False):
+                    st.caption(
+                        "Fix anything the converter got wrong, then save — your "
+                        "correction is stored and shown to the LLM on future "
+                        "conversions of similar workflows."
+                    )
                     edited = st.text_area(
                         "spec", value=st.session_state["wiz_spec_yaml"], height=320,
                         label_visibility="collapsed",
                     )
-                    if st.button("Apply edits", key="wiz_apply"):
+                    if st.button("Save edits & train", type="primary", key="wiz_apply"):
                         try:
                             revalidated = PipelineSpec.model_validate(yaml.safe_load(edited))
                             st.session_state["wiz_spec"] = revalidated
@@ -428,7 +499,7 @@ with tab_quick:
                                 generated_spec_yaml=st.session_state["wiz_spec_yaml_generated"],
                                 corrected_spec_yaml=edited,
                             )
-                            st.success("Spec updated.")
+                            st.success("Spec updated and correction recorded.")
                         except (yaml.YAMLError, ValidationError) as exc:
                             st.error(f"Invalid spec: {exc}")
                 gate_ok = True
@@ -516,8 +587,22 @@ with tab_quick:
                         _push_bundle_to_git(bundle_dir, st.session_state["wiz_wf"])
                     else:
                         log_deploy_error(st.session_state["wiz_wf"], "deploy", log)
+                        st.session_state["wiz_deploy_error"] = log
                         st.error("Deploy failed — details below.")
                         st.code(log)
+
+            def _wiz_apply_repair(repaired: PipelineSpec, repaired_yaml: str) -> None:
+                st.session_state["wiz_spec"] = repaired
+                st.session_state["wiz_spec_yaml"] = repaired_yaml
+
+            _offer_auto_repair(
+                "wiz_deploy_error",
+                st.session_state.get("wiz_wf", "unknown"),
+                st.session_state.get("wiz_spec_yaml", ""),
+                "deploy",
+                st.session_state.get("wiz_tool_types", []),
+                _wiz_apply_repair,
+            )
 
             if st.session_state.get("wiz_deployed"):
                 st.success("Deployed. Continue to verify the result.")
@@ -551,7 +636,24 @@ with tab_quick:
                         rok, rlog = run_bundle_job(st.session_state["wiz_bundle"], wiz_host, wiz_token)
                     if not rok:
                         log_deploy_error(st.session_state.get("wiz_wf", "unknown"), "run", rlog)
+                        st.session_state["wiz_run_error"] = rlog
+                    else:
+                        st.session_state.pop("wiz_run_error", None)
                     (st.success if rok else st.error)(rlog[-800:])
+
+            def _wiz_apply_run_repair(repaired: PipelineSpec, repaired_yaml: str) -> None:
+                st.session_state["wiz_spec"] = repaired
+                st.session_state["wiz_spec_yaml"] = repaired_yaml
+                st.session_state["wiz_deployed"] = False  # must redeploy the fix
+
+            _offer_auto_repair(
+                "wiz_run_error",
+                st.session_state.get("wiz_wf", "unknown"),
+                st.session_state.get("wiz_spec_yaml", ""),
+                "run",
+                st.session_state.get("wiz_tool_types", []),
+                _wiz_apply_run_repair,
+            )
             if vc2.button("Validate output table", type="primary", key="wiz_validate"):
                 if not wiz_token:
                     st.error("Access token required.")
@@ -661,6 +763,40 @@ with tab_repo:
         except CyclicDependencyError as exc:
             st.error(str(exc))
 
+        with st.expander("Learning log — what the accelerator has learned"):
+            st.caption(
+                "Human spec corrections feed future LLM conversions (retrieval, "
+                "not fine-tuning); Databricks failures are captured per stage. "
+                "Tool types that keep appearing here are where the converter "
+                "most needs work."
+            )
+            corr_counts = correction_counts_by_tool()
+            stage_counts = deploy_error_counts_by_stage()
+            lc1, lc2 = st.columns(2)
+            with lc1:
+                st.markdown("**Corrections by tool type**")
+                if corr_counts:
+                    st.dataframe(
+                        [{"tool": t, "corrections": n} for t, n in corr_counts.items()],
+                        use_container_width=True, hide_index=True,
+                    )
+                else:
+                    st.caption("None yet — save an edited spec to start training.")
+            with lc2:
+                st.markdown("**Databricks failures by stage**")
+                if stage_counts:
+                    st.dataframe(
+                        [{"stage": s, "failures": n} for s, n in stage_counts.items()],
+                        use_container_width=True, hide_index=True,
+                    )
+                else:
+                    st.caption("No failures recorded.")
+            for err in recent_deploy_errors(limit=3):
+                st.caption(
+                    f"`{err.logged_at[:16]}` **{err.workflow_name}** ({err.stage}): "
+                    f"{err.message[:160]}"
+                )
+
 with tab_convert:
     if not object_names:
         st.info("Ingest an object first.")
@@ -720,22 +856,44 @@ with tab_convert:
             edited = st.text_area("spec_yaml", value=st.session_state[spec_key], height=400, label_visibility="collapsed")
             st.session_state[spec_key] = edited
 
-            if st.button("Validate edits", key=f"validate::{selected}"):
+            if st.button("Save edits & train", type="primary", key=f"validate::{selected}"):
                 try:
                     data = yaml.safe_load(edited)
                     validated_spec = PipelineSpec.model_validate(data)
                     st.session_state[f"validated_spec::{selected}"] = validated_spec
                     generated_yaml = st.session_state.get(f"{spec_key}::generated")
-                    if generated_yaml is not None:
+                    trained = False
+                    if generated_yaml is not None and generated_yaml.strip() != edited.strip():
                         log_conversion_triple(
                             workflow_name=selected,
                             tool_types=st.session_state.get(f"tool_types::{selected}", []),
                             generated_spec_yaml=generated_yaml,
                             corrected_spec_yaml=edited,
                         )
-                    st.success("Spec is valid.")
+                        trained = True
+                    st.success(
+                        "Spec saved — correction recorded, future conversions of "
+                        "similar workflows will see this fix."
+                        if trained else "Spec is valid (no changes from the generated version)."
+                    )
                 except (yaml.YAMLError, ValidationError) as exc:
                     st.error(f"Validation failed: {exc}")
+            st.caption(
+                "Edits are compared against the generated spec and stored as a "
+                "correction — the retrieval loop shows them to the LLM next time "
+                "it converts a workflow using similar tools."
+            )
+
+            similar = find_similar_corrections(
+                set(st.session_state.get(f"tool_types::{selected}", []))
+            )
+            if similar:
+                with st.expander(
+                    f"What the system learned from {len(similar)} similar past correction(s)"
+                ):
+                    for rec in similar:
+                        st.markdown(f"**{rec.workflow_name}** — corrected on {rec.logged_at[:10]}")
+                        st.code(summarize_correction(rec), language="diff")
             st.caption(
                 "Spec is ready — open the **Generated code** tab to pick Job / Notebook / SDP "
                 "(or ask the LLM to recommend one)."
@@ -919,6 +1077,16 @@ with tab_parity:
                 )
             else:
                 st.error(f"PARITY FAILED — migrated: {m} rows, expected: {e} rows.")
+                # The strongest conversion-bug signal there is: capture it
+                # alongside deploy/run failures rather than showing it once.
+                sample = report["extra_in_migrated"]["rows"][:3]
+                log_deploy_error(
+                    migrated_table.strip(), "parity",
+                    f"migrated={m} expected={e}; "
+                    f"extra_in_migrated={len(report['extra_in_migrated']['rows'])} "
+                    f"missing_from_migrated={len(report['missing_from_migrated']['rows'])}; "
+                    f"sample_extra={sample!r}",
+                )
                 if report["extra_in_migrated"]["rows"]:
                     st.write("Rows in the migrated table but not in the Alteryx output (sample):")
                     st.dataframe(
@@ -1042,7 +1210,21 @@ with tab_deploy:
                         _push_bundle_to_git(bundle_dir, selected)
                     else:
                         log_deploy_error(selected, "deploy", log)
+                        st.session_state[f"deploy_error::{selected}"] = log
                         st.error("Deploy failed — see the CLI output above.")
+
+            def _tab_apply_repair(repaired: PipelineSpec, repaired_yaml: str) -> None:
+                st.session_state[f"validated_spec::{selected}"] = repaired
+                st.session_state[f"spec_yaml::{selected}"] = repaired_yaml
+
+            _offer_auto_repair(
+                f"deploy_error::{selected}",
+                selected,
+                st.session_state.get(f"spec_yaml::{selected}", ""),
+                "deploy",
+                st.session_state.get(f"tool_types::{selected}", []),
+                _tab_apply_repair,
+            )
 
             if st.button("Run the deployed job now"):
                 if not token:
@@ -1058,6 +1240,22 @@ with tab_deploy:
                         st.code(log)
                         if not ok:
                             log_deploy_error(selected, "run", log)
+                            st.session_state[f"run_error::{selected}"] = log
+                        else:
+                            st.session_state.pop(f"run_error::{selected}", None)
                         (st.success if ok else st.error)(
                             "Job succeeded." if ok else "Job failed — see output above."
                         )
+
+            def _tab_apply_run_repair(repaired: PipelineSpec, repaired_yaml: str) -> None:
+                st.session_state[f"validated_spec::{selected}"] = repaired
+                st.session_state[f"spec_yaml::{selected}"] = repaired_yaml
+
+            _offer_auto_repair(
+                f"run_error::{selected}",
+                selected,
+                st.session_state.get(f"spec_yaml::{selected}", ""),
+                "run",
+                st.session_state.get(f"tool_types::{selected}", []),
+                _tab_apply_run_repair,
+            )

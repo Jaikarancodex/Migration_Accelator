@@ -1,0 +1,26 @@
+## Task
+
+A pipeline spec you (or a colleague) generated for the workflow
+'{{ workflow_name }}' was deployed to Databricks and failed. Repair the spec
+so the failure cannot recur, changing as little as possible.
+
+## The current spec (YAML)
+
+```yaml
+{{ spec_yaml }}
+```
+
+## The Databricks failure ({{ stage }})
+
+```
+{{ error_message }}
+```
+
+## Rules
+
+- Emit the FULL corrected spec as YAML only — no commentary, no fences.
+- Keep every step you are not fixing byte-identical; do not reorder or
+  rename anything the error does not implicate.
+- If the error names a missing table/column, prefer correcting the reference
+  over inventing new steps.
+- The YAML must validate against the same PipelineSpec schema as the input.

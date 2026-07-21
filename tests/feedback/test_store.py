@@ -62,3 +62,35 @@ def test_summarize_correction_produces_diff_and_truncates() -> None:
     diff = summarize_correction(record, max_lines=5)
     assert diff.count("\n") <= 5
     assert "truncated" in diff
+
+
+def test_correction_counts_by_tool(tmp_path: Path) -> None:
+    from feedback.store import correction_counts_by_tool, log_conversion_triple
+
+    store = tmp_path / "fb.jsonl"
+    log_conversion_triple("a", ["filter", "join"], "x", "y", store_path=store)
+    log_conversion_triple("b", ["join", "join", "union"], "x", "z", store_path=store)
+
+    counts = correction_counts_by_tool(store_path=store)
+    # join leads (2 workflows), and duplicate tool uses within one workflow count once
+    assert counts["join"] == 2
+    assert counts["filter"] == 1
+    assert counts["union"] == 1
+    assert list(counts)[0] == "join"
+
+
+def test_deploy_error_stats_and_recent(tmp_path: Path) -> None:
+    from feedback.store import (
+        deploy_error_counts_by_stage,
+        log_deploy_error,
+        recent_deploy_errors,
+    )
+
+    store = tmp_path / "err.jsonl"
+    log_deploy_error("wf1", "deploy", "e1", store_path=store)
+    log_deploy_error("wf2", "run", "e2", store_path=store)
+    log_deploy_error("wf3", "run", "e3", store_path=store)
+
+    assert deploy_error_counts_by_stage(store_path=store) == {"run": 2, "deploy": 1}
+    recent = recent_deploy_errors(limit=2, store_path=store)
+    assert [r.workflow_name for r in recent] == ["wf3", "wf2"]  # newest first
