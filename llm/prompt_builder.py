@@ -11,7 +11,12 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from convert.spec import TargetRef
-from feedback.store import find_similar_corrections, summarize_correction
+from feedback.store import (
+    find_code_corrections,
+    find_similar_corrections,
+    summarize_code_correction,
+    summarize_correction,
+)
 from functions.registry import render_signatures_for_prompt
 from ingest.alteryx.ir import Node, ToolType, Workflow
 from knowledge.alteryx_tools import render_knowledge_for_prompt
@@ -85,11 +90,21 @@ def build_alteryx_to_pyspark_prompt(workflow: Workflow, target: TargetRef) -> tu
     )
 
     similar = find_similar_corrections({n.tool_type.value for n in workflow.nodes})
-    past_corrections = "\n\n".join(
+    correction_blocks = [
         f"### A human reviewer corrected a past conversion of {rec.workflow_name!r} "
         f"that used similar tools:\n```diff\n{summarize_correction(rec)}\n```"
         for rec in similar
+    ]
+    # Manual edits to the *generated code* of this same workflow: produce a
+    # spec whose rendered output already reflects these fixes. This is what
+    # makes "Save code edits & train" influence the next conversion.
+    correction_blocks.extend(
+        f"### A reviewer hand-edited the generated {rec.artifact_format} code for this "
+        f"workflow — render a spec that already produces the fixed version:\n"
+        f"```diff\n{summarize_code_correction(rec)}\n```"
+        for rec in find_code_corrections(workflow.name, limit=3)
     )
+    past_corrections = "\n\n".join(correction_blocks)
 
     template = _ENV.get_template("alteryx_to_pyspark.j2")
     user_prompt = template.render(

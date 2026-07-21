@@ -82,6 +82,26 @@ def test_prompt_surfaces_similar_past_correction(
     assert "left: a" in user and "right: b" in user
 
 
+def test_prompt_surfaces_manual_code_edit_for_same_workflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import feedback.store as store_module
+
+    monkeypatch.setattr(store_module, "_DEFAULT_CODE_STORE", tmp_path / "code.jsonl")
+    # sales_summary is the fixture's workflow name; a code edit on it must
+    # reach the next conversion's prompt so "Save code edits" actually trains.
+    store_module.log_code_correction(
+        workflow_name="sales_summary",
+        artifact_format="sdp",
+        generated_code="df = df.withColumn('d', F.expr('DateTimetoUTC(x)'))",
+        edited_code="df = df.withColumn('d', F.current_timestamp())",
+    )
+    workflow = parse_yxmd(FIXTURE)
+    _, user = build_alteryx_to_pyspark_prompt(workflow, TARGET)
+    assert "hand-edited the generated sdp code" in user
+    assert "current_timestamp" in user
+
+
 def test_generate_pipeline_spec_success() -> None:
     workflow = parse_yxmd(FIXTURE)
     client = MockLLMClient(response=VALID_SPEC_YAML)

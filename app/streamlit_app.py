@@ -370,13 +370,17 @@ def _render_artifact_preview(spec: PipelineSpec, artifact_format: ArtifactFormat
             )
             st.code(utility_code, language="python")
 
-    with st.expander("Edit code manually & train"):
+    with st.expander("Edit code manually"):
         st.caption(
             "Fix anything directly in the code — deploys for this format use your "
-            "version, and the edit is logged as a correction. Prefer editing the "
-            "spec when the fix is expressible there (spec fixes feed the LLM "
-            "directly and survive regeneration; code edits are cleared when the "
-            "spec is regenerated)."
+            "version, and the edit is logged. What the log does: on the **LLM "
+            "backend**, re-converting this workflow shows the LLM your edit so it "
+            "targets the fix; on the **offline converter** (deterministic), it "
+            "can't change output — it's a signal in the Learning log that a "
+            "recurring edit belongs in the renderer. Prefer editing the **spec** "
+            "when you can: spec fixes train across workflows and survive "
+            "regeneration, code edits are per-format and cleared when the spec "
+            "regenerates."
         )
         edited_code = st.text_area(
             "generated code",
@@ -386,7 +390,7 @@ def _render_artifact_preview(spec: PipelineSpec, artifact_format: ArtifactFormat
             label_visibility="collapsed",
         )
         if st.button(
-            "Save code edits & train", type="primary",
+            "Save code edits", type="primary",
             key=f"{key}::save_code::{artifact_format}",
         ):
             try:
