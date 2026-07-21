@@ -9,9 +9,9 @@ from pyspark.sql import functions as F  # noqa: N812
 
 from pyspark import pipelines as dp
 
-@dp.table(name="bronze_todo_source_28", comment="Raw landing of main.migration_dev.todo_source_28", table_properties={"delta.columnMapping.mode": "name"})
+@dp.table(name="bronze_todo_source_28", comment="Raw landing of migration_accelator.testing.todo_source_28", table_properties={"delta.columnMapping.mode": "name"})
 def bronze_todo_source_28():  # noqa: ANN201
-    return spark.read.table("main.migration_dev.todo_source_28")
+    return spark.read.table("migration_accelator.testing.todo_source_28")
 
 @dp.table(name="silver_W3", comment="Transformed data for W3", table_properties={"delta.columnMapping.mode": "name"})
 def silver_W3():  # noqa: ANN201
@@ -30,6 +30,6 @@ def silver_W3():  # noqa: ANN201
     df_30 = df_30.withColumn("TopWBS", F.expr('LEFT(`TopWBS`,50)'))
     return df_30
 
-@dp.table(name="gold_project_cube_le", comment="Business-level output main.migration_dev.project_cube_le", table_properties={"delta.columnMapping.mode": "name"})
+@dp.table(name="gold_project_cube_le", comment="Business-level output migration_accelator.testing.project_cube_le", table_properties={"delta.columnMapping.mode": "name"})
 def gold_project_cube_le():  # noqa: ANN201
     return spark.read.table("silver_W3")

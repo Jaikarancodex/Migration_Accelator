@@ -3,16 +3,16 @@ bundle:
 variables:
   catalog:
     description: Target catalog
-    default: main
+    default: migration_accelator
   schema:
     description: Target schema
-    default: migration_dev
+    default: testing
 resources:
   pipelines:
     W3_pipeline:
       name: W3_pipeline
-      catalog: main
-      schema: migration_dev
+      catalog: migration_accelator
+      schema: testing
       serverless: true
       libraries:
       - file:
@@ -23,5 +23,5 @@ targets:
     workspace:
       host: https://dbc-7e2fd23b-42d1.cloud.databricks.com
     variables:
-      catalog: main
-      schema: migration_dev
+      catalog: migration_accelator
+      schema: testing
