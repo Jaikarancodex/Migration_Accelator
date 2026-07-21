@@ -11,6 +11,7 @@ next step once a Databricks/Spark runtime is available.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -108,6 +109,23 @@ def _group_aggregate(
     return results
 
 
+def _aggregates_equal(a: float | int | None, b: float | int | None) -> bool:
+    """Value equality with float tolerance.
+
+    Floating-point sums depend on addition order (and on the Python version:
+    3.12's `sum()` compensates rounding, 3.11's doesn't), so two row sets
+    holding identical values can legitimately aggregate to 334.69999999999993
+    vs 334.7. Real engine comparisons (Alteryx export vs Spark output) differ
+    in the last bits the same way; bit-exact equality would report false
+    mismatches on correct migrations.
+    """
+    if a is None or b is None:
+        return a is None and b is None
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a == b
+    return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12)
+
+
 def compare_key_aggregates(
     source_rows: list[dict[str, Any]],
     target_rows: list[dict[str, Any]],
@@ -125,7 +143,7 @@ def compare_key_aggregates(
         for key in sorted(set(source_agg) | set(target_agg), key=str):
             source_value = source_agg.get(key)
             target_value = target_agg.get(key)
-            if source_value != target_value:
+            if not _aggregates_equal(source_value, target_value):
                 mismatches.append(
                     KeyAggregateMismatch(
                         key=key, column=column, func=func, source_value=source_value, target_value=target_value
