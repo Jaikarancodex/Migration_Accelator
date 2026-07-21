@@ -9,15 +9,15 @@ from pyspark.sql import functions as F  # noqa: N812
 
 from pyspark import pipelines as dp
 
-@dp.table(name="bronze_todo_source_28", comment="Raw landing of Migration_Accelator.testing.todo_source_28")
+@dp.table(name="bronze_todo_source_28", comment="Raw landing of main.migration_dev.todo_source_28", table_properties={"delta.columnMapping.mode": "name"})
 def bronze_todo_source_28():  # noqa: ANN201
-    return spark.read.table("Migration_Accelator.testing.todo_source_28")
+    return spark.read.table("main.migration_dev.todo_source_28")
 
-@dp.table(name="silver_W3", comment="Transformed data for W3")
+@dp.table(name="silver_W3", comment="Transformed data for W3", table_properties={"delta.columnMapping.mode": "name"})
 def silver_W3():  # noqa: ANN201
     df_src_28 = spark.read.table("bronze_todo_source_28")
     df_28 = df_src_28
-    df_28 = df_28.withColumn("SnapShotDate", F.expr('DateTimetoUTC(current_date())'))  # REVIEW: verify ['DateTimetoUTC'] translate correctly to Spark SQL
+    df_28 = df_28.withColumn("SnapShotDate", F.current_timestamp())
     df_28 = df_28.withColumn("ProjectCube_Data[Redbox Customer]", F.expr('LEFT(`ProjectCube_Data[Redbox Customer]`,30)'))
     df_28 = df_28.withColumn("ProjectCube_Data[Account_ID]", F.expr('LEFT(`ProjectCube_Data[Account_ID]`,30)'))
     df_28 = df_28.withColumn("ProjectCube_Data[Source_ID]", F.expr('LEFT(`ProjectCube_Data[Source_ID]`,15)'))
@@ -30,6 +30,6 @@ def silver_W3():  # noqa: ANN201
     df_30 = df_30.withColumn("TopWBS", F.expr('LEFT(`TopWBS`,50)'))
     return df_30
 
-@dp.table(name="gold_ionpmview_dbo_project_cube_le", comment="Business-level output Migration_Accelator.testing.ionpmview_dbo_project_cube_le")
-def gold_ionpmview_dbo_project_cube_le():  # noqa: ANN201
+@dp.table(name="gold_project_cube_le", comment="Business-level output main.migration_dev.project_cube_le", table_properties={"delta.columnMapping.mode": "name"})
+def gold_project_cube_le():  # noqa: ANN201
     return spark.read.table("silver_W3")
