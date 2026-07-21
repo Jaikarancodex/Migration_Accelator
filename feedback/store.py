@@ -19,6 +19,9 @@ from pathlib import Path
 from pydantic import BaseModel
 
 _DEFAULT_STORE = Path(__file__).resolve().parent.parent / "migration_repo_output" / "feedback.jsonl"
+_DEFAULT_ERROR_STORE = (
+    Path(__file__).resolve().parent.parent / "migration_repo_output" / "deploy_errors.jsonl"
+)
 
 
 class ConversionRecord(BaseModel):
@@ -52,6 +55,41 @@ def log_conversion_triple(
         tool_types=tool_types,
         generated_spec_yaml=generated_spec_yaml,
         corrected_spec_yaml=corrected_spec_yaml,
+    )
+    with path.open("a", encoding="utf-8") as f:
+        f.write(record.model_dump_json() + "\n")
+
+
+class DeployErrorRecord(BaseModel):
+    """One Databricks-side failure (validate/deploy/run) for a converted workflow.
+
+    An audit trail of what actually broke downstream of conversion. Not yet
+    injected into prompts — the correction loop learns from *human spec
+    edits*; this store is the raw material for closing the remaining gap
+    (feeding real runtime errors back into future conversions).
+    """
+
+    workflow_name: str
+    stage: str  # "validate" | "deploy" | "run"
+    message: str
+    logged_at: str = ""
+
+    def model_post_init(self, __context: object) -> None:
+        if not self.logged_at:
+            self.logged_at = datetime.now(UTC).isoformat()
+
+
+def log_deploy_error(
+    workflow_name: str,
+    stage: str,
+    message: str,
+    store_path: Path | None = None,
+) -> None:
+    """Append one Databricks failure record (message truncated to stay scannable)."""
+    path = store_path or _DEFAULT_ERROR_STORE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = DeployErrorRecord(
+        workflow_name=workflow_name, stage=stage, message=message[:4000]
     )
     with path.open("a", encoding="utf-8") as f:
         f.write(record.model_dump_json() + "\n")

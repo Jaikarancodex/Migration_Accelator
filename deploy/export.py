@@ -73,6 +73,11 @@ def export_bundle_from_spec(
     out = Path(output_dir)
     src_dir = out / "src"
     src_dir.mkdir(parents=True, exist_ok=True)
+    # A re-export must fully replace the previous one: a renamed workflow or
+    # a spec that no longer needs its utility module would otherwise leave
+    # stale .py files in src/, silently uploaded on every later deploy.
+    for stale in src_dir.glob("*.py"):
+        stale.unlink()
     (src_dir / f"{safe_stem}.py").write_text(code, encoding="utf-8")
 
     # Macro/cleanse helpers render into a separate file, shared by whichever

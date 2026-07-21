@@ -69,3 +69,41 @@ def test_export_without_macros_or_cleanse_writes_only_main_file(tmp_path: Path) 
     )
     src_files = sorted(p.name for p in (out / "src").iterdir())
     assert src_files == ["sales_summary.py"]
+
+
+def test_reexport_removes_stale_files_from_previous_export(tmp_path: Path) -> None:
+    """A re-export fully replaces the bundle's src/: files from an earlier
+    export (old workflow name, dropped utility module) must not survive to
+    be silently deployed alongside the new artifact.
+    """
+    bundle_dir = tmp_path / "bundle"
+    spec = _spec_with_cleanse(tmp_path)
+    export_bundle_from_spec(
+        spec, bundle_dir, workspace_host="https://x.cloud.databricks.com",
+        artifact_format="job",
+    )
+    stale = bundle_dir / "src" / "old_workflow_name.py"
+    stale.write_text("# left over from a previous export", encoding="utf-8")
+
+    export_bundle_from_spec(
+        spec, bundle_dir, workspace_host="https://x.cloud.databricks.com",
+        artifact_format="job",
+    )
+    src_files = sorted(p.name for p in (bundle_dir / "src").iterdir())
+    assert src_files == ["cleanse_flow.py", "cleanse_flow_utils.py"]
+
+
+def test_deploy_error_log_appends_records(tmp_path: Path) -> None:
+    from feedback.store import DeployErrorRecord, log_deploy_error
+
+    store = tmp_path / "deploy_errors.jsonl"
+    log_deploy_error("wf_a", "deploy", "Error: resource name invalid", store_path=store)
+    log_deploy_error("wf_a", "run", "x" * 9000, store_path=store)
+
+    lines = store.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    first = DeployErrorRecord.model_validate_json(lines[0])
+    assert (first.workflow_name, first.stage) == ("wf_a", "deploy")
+    assert first.logged_at
+    second = DeployErrorRecord.model_validate_json(lines[1])
+    assert len(second.message) == 4000  # truncated, not unbounded CLI output

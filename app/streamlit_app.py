@@ -59,7 +59,7 @@ from deploy.dbsql import (
 )
 from deploy.export import deploy_bundle, export_bundle_from_spec, run_bundle_job
 from deploy.gitops import GitError, commit_and_push, repo_info, set_remote
-from feedback.store import log_conversion_triple
+from feedback.store import log_conversion_triple, log_deploy_error
 from ingest.alteryx.ir import ToolType
 from ingest.alteryx.parser import parse_yxmd
 from knowledge.alteryx_tools import lookup_by_plugin
@@ -513,6 +513,7 @@ with tab_quick:
                             st.success(f"Job created — {line}")
                         _push_bundle_to_git(bundle_dir, st.session_state["wiz_wf"])
                     else:
+                        log_deploy_error(st.session_state["wiz_wf"], "deploy", log)
                         st.error("Deploy failed — details below.")
                         st.code(log)
 
@@ -546,6 +547,8 @@ with tab_quick:
                 else:
                     with st.spinner("Running job..."):
                         rok, rlog = run_bundle_job(st.session_state["wiz_bundle"], wiz_host, wiz_token)
+                    if not rok:
+                        log_deploy_error(st.session_state.get("wiz_wf", "unknown"), "run", rlog)
                     (st.success if rok else st.error)(rlog[-800:])
             if vc2.button("Validate output table", type="primary", key="wiz_validate"):
                 if not wiz_token:
@@ -1034,6 +1037,7 @@ with tab_deploy:
                         st.success(f"Deployed. Bundle written to `bundles/{safe_name}/`.")
                         _push_bundle_to_git(bundle_dir, selected)
                     else:
+                        log_deploy_error(selected, "deploy", log)
                         st.error("Deploy failed — see the CLI output above.")
 
             if st.button("Run the deployed job now"):
@@ -1048,6 +1052,8 @@ with tab_deploy:
                         with st.spinner("Running job (waits for completion)..."):
                             ok, log = run_bundle_job(bundle_dir, deploy_host, token)
                         st.code(log)
+                        if not ok:
+                            log_deploy_error(selected, "run", log)
                         (st.success if ok else st.error)(
                             "Job succeeded." if ok else "Job failed — see output above."
                         )
