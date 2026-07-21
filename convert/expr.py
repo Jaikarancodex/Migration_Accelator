@@ -40,6 +40,13 @@ _FUNC_RENAMES: dict[str, str] = {
     "trimright": "rtrim",
     "regex_replace": "regexp_replace",
     "regex_match": "rlike",
+    # same call shape and semantics, different name in Spark SQL
+    "padleft": "lpad",
+    "padright": "rpad",
+    "ceiling": "ceil",
+    "replacechar": "translate",  # char-for-char replacement
+    "md5_ascii": "md5",
+    "md5_unicode": "md5",
 }
 
 _NULL_CALL = re.compile(r"\bnull\s*\(\s*\)", re.IGNORECASE)
@@ -69,6 +76,7 @@ _KNOWN_SAFE_FUNCTIONS: frozenset[str] = frozenset({
     "cast", "greatest", "least", "now", "date", "to_date", "to_timestamp",
     "date_format", "datediff", "date_add", "date_sub", "dateadd",
     "to_utc_timestamp", "from_utc_timestamp",
+    "lpad", "rpad", "translate", "md5", "ln", "log", "log10", "exp",
     "regexp_extract", "split", "array", "size", "sum", "count", "avg",
     "min", "max", "distinct", "in", "like", "between", "exists",
     # SQL keywords that can appear immediately before "(" in generated text
@@ -148,6 +156,29 @@ def _rewrite_datetimeadd(expr: str) -> str:
             unit = ""
         if unit in _DATE_UNITS:
             replacement = f"dateadd({unit.upper()}, {args[1]}, {args[0]})"
+            expr = f"{expr[:start]}{replacement}{expr[end:]}"
+            search_from = start + len(replacement)
+        else:
+            search_from = end
+    return expr
+
+
+def _rewrite_datetimediff(expr: str) -> str:
+    """Alteryx DateTimeDiff(dt1, dt2, "days") -> Spark datediff(dt1, dt2).
+
+    Alteryx returns dt1 - dt2 in the given unit; Spark's datediff is exactly
+    that in days. Only the day unit maps to a single clean builtin, so other
+    units are left untouched (and flagged) rather than mistranslated.
+    """
+    search_from = 0
+    while (found := _find_call(expr, "datetimediff", search_from)) is not None:
+        start, end, args = found
+        unit = ""
+        if len(args) == 3:
+            unit_match = re.fullmatch(r"""['"]\s*(\w+)\s*['"]""", args[2].strip())
+            unit = unit_match.group(1).lower() if unit_match else ""
+        if unit in ("day", "days"):
+            replacement = f"datediff({args[0]}, {args[1]})"
             expr = f"{expr[:start]}{replacement}{expr[end:]}"
             search_from = start + len(replacement)
         else:
@@ -249,6 +280,7 @@ def alteryx_expr_to_spark(expression: str) -> str:
     expr = _rewrite_block_if(expr)
     expr = _rename_functions(expr)
     expr = _rewrite_datetimeadd(expr)
+    expr = _rewrite_datetimediff(expr)
     expr = _rewrite_tz_convert(expr, "datetimetoutc", "to_utc_timestamp")
     expr = _rewrite_tz_convert(expr, "datetimetolocal", "from_utc_timestamp")
     expr = _rewrite_isempty(expr)

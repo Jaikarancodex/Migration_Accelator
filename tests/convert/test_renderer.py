@@ -112,14 +112,14 @@ def test_render_filter_flags_unrecognized_function_for_review() -> None:
         name="flagged", language="pyspark", source=SOURCE, target=TARGET,
         steps=[
             ReadStep(id="r", source_table="t", alias="t"),
-            FilterStep(id="f", input="r", condition='DateTimeDiff([A],[B],"DAY") > 0'),
+            FilterStep(id="f", input="r", condition='GetWord([A], 2) = "x"'),
             WriteStep(id="w", input="f", target_table="main.x.flagged"),
         ],
     )
     source = render_pyspark(spec)
     filter_line = next(line for line in source.splitlines() if "df_f = df_r.filter" in line)
     assert "# REVIEW: verify" in filter_line
-    assert "DateTimeDiff" in filter_line
+    assert "GetWord" in filter_line
 
 
 def test_render_filter_no_review_comment_for_known_functions() -> None:
@@ -536,3 +536,26 @@ def test_clean_column_names_do_not_enable_column_mapping() -> None:
     assert "columnMapping" not in job
     # the plain write is unchanged
     assert ".write.mode('overwrite').saveAsTable(" in job
+
+
+def test_extended_summarize_aggregations_render() -> None:
+    spec = PipelineSpec(
+        name="agg2", language="pyspark", source=SOURCE, target=TARGET,
+        steps=[
+            ReadStep(id="r", source_table="t", alias="t"),
+            AggregateStep(
+                id="a", input="r", group_by=["region"],
+                aggregations=[
+                    Aggregation(column="amt", func="stddev", alias="sd"),
+                    Aggregation(column="amt", func="countDistinct", alias="uniq"),
+                    Aggregation(column="amt", func="first", alias="f"),
+                ],
+            ),
+            WriteStep(id="w", input="a", target_table="main.x.agg2"),
+        ],
+    )
+    source = render_pyspark(spec)
+    compile(source, "<g>", "exec")
+    assert 'F.stddev("amt").alias("sd")' in source
+    assert 'F.countDistinct("amt").alias("uniq")' in source
+    assert 'F.first("amt").alias("f")' in source

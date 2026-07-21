@@ -81,3 +81,24 @@ def test_datetimetolocal_maps_to_from_utc_timestamp() -> None:
     assert alteryx_expr_to_spark("DateTimeToLocal([ts])") == (
         "from_utc_timestamp(`ts`, 'UTC')"
     )
+
+
+def test_padleft_padright_and_ceiling_renames() -> None:
+    assert alteryx_expr_to_spark("PadLeft([x], 10, '0')") == "lpad(`x`, 10, '0')"
+    assert alteryx_expr_to_spark("PadRight([x], 5, ' ')") == "rpad(`x`, 5, ' ')"
+    assert alteryx_expr_to_spark("Ceiling([n])") == "ceil(`n`)"
+
+
+def test_replacechar_maps_to_translate_and_md5() -> None:
+    assert alteryx_expr_to_spark("ReplaceChar([s], 'ab', 'xy')") == "translate(`s`, 'ab', 'xy')"
+    assert alteryx_expr_to_spark("MD5_ASCII([s])") == "md5(`s`)"
+
+
+def test_datetimediff_days_maps_to_datediff() -> None:
+    assert alteryx_expr_to_spark('DateTimeDiff([a], [b], "days")') == "datediff(`a`, `b`)"
+
+
+def test_datetimediff_nonday_unit_left_flagged() -> None:
+    out = alteryx_expr_to_spark('DateTimeDiff([a], [b], "months")')
+    assert out.startswith("DateTimeDiff(")
+    assert "DateTimeDiff" in unknown_functions(out)
