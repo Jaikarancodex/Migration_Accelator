@@ -11,6 +11,7 @@ reads from this store, never from the original source files.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from ingest.alteryx.ir import ToolType, Workflow
@@ -75,6 +76,12 @@ class MigrationRepo:
             return []
         return sorted(p.name for p in self.root.iterdir() if p.is_dir() and p.name != "macros")
 
+    def delete_object(self, name: str) -> None:
+        """Remove an object's ir.json/metadata.json from the repo. No-op if absent."""
+        obj_dir = self._object_dir(name)
+        if obj_dir.is_dir() and obj_dir.parent == self.root and obj_dir.name != "macros":
+            shutil.rmtree(obj_dir)
+
     # -- Macro registry (.yxmc workflows, keyed by lowercase stem) ----------
 
     def _macro_dir(self) -> Path:
@@ -104,6 +111,12 @@ class MigrationRepo:
         if not self._macro_dir().exists():
             return []
         return sorted(p.stem for p in self._macro_dir().glob("*.json"))
+
+    def delete_macro(self, key: str) -> None:
+        """Unregister a macro. No-op if it isn't registered."""
+        path = self._macro_dir() / f"{key.lower()}.json"
+        if path.is_file():
+            path.unlink()
 
     def all_macros(self) -> dict[str, Workflow]:
         return {name: self.read_macro(name) for name in self.list_macro_names()}

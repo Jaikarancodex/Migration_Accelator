@@ -363,6 +363,86 @@ def test_render_sdp_requires_a_write_step() -> None:
         render_sdp(spec)
 
 
+def _branching_spec() -> PipelineSpec:
+    """A gold layer with two divergent output branches, a gold step that
+    reads a bronze source directly (bypassing silver), a Union referencing a
+    non-terminal silver-chain id, and one step no write ever consumes.
+    """
+    return PipelineSpec(
+        name="branching", language="pyspark", source=SOURCE, target=TARGET,
+        steps=[
+            ReadStep(id="ra", source_table="legacy.a", alias="a"),
+            ReadStep(id="rb", source_table="legacy.b", alias="b"),
+            FilterStep(id="fa1", input="ra", condition="[x] > 0"),
+            WithColumnsStep(
+                id="fa2", input="fa1", columns=[ComputedColumn(name="y", expression="[x] * 2")]
+            ),
+            AggregateStep(
+                id="agg1", input="fa2", group_by=["y"],
+                aggregations=[Aggregation(column="y", func="sum", alias="total")],
+            ),
+            JoinStep(
+                id="joinb", left="agg1", right="rb",
+                left_keys=["y"], right_keys=["y"], how="inner", use_function=None,
+            ),
+            UnionStep(id="unioned", inputs=["joinb", "fa1"]),
+            FilterStep(id="branch_a_only", input="unioned", condition="[total] > 0"),
+            WithColumnsStep(
+                id="branch_b_only", input="unioned",
+                columns=[ComputedColumn(name="z", expression="[total] + 1")],
+            ),
+            FilterStep(id="orphan", input="unioned", condition="[total] < 100"),
+            WriteStep(id="w1", input="branch_a_only", target_table="main.x.out_a"),
+            WriteStep(id="w2", input="branch_b_only", target_table="main.x.out_b"),
+        ],
+    )
+
+
+def test_render_sdp_gold_step_reads_own_bronze_not_silver() -> None:
+    source = render_sdp(_branching_spec())
+    compile(source, "<generated>", "exec")
+    gold_a = source.split('gold_out_a"')[1].split("@dp.table")[0]
+    # `joinb` reads `rb` directly (right="rb"), bypassing silver entirely --
+    # it must resolve to rb's own bronze table, not silver's unrelated output.
+    assert 'df_rb = spark.read.table("bronze_b")' in gold_a
+    assert 'df_rb = spark.read.table("silver_branching")' not in source
+
+
+def test_render_sdp_flags_nonterminal_silver_reference_for_review() -> None:
+    source = render_sdp(_branching_spec())
+    gold_a = source.split('gold_out_a"')[1].split("@dp.table")[0]
+    # `unioned` references `fa1` directly, but silver's table only exposes
+    # `fa2` (silver_last) -- the substitution is an approximation and must
+    # be visibly flagged, while the true terminal id is not.
+    assert 'df_fa1 = spark.read.table("silver_branching")  # REVIEW' in gold_a
+    assert 'df_fa2 = spark.read.table("silver_branching")' in gold_a
+    fa2_line = next(line for line in gold_a.splitlines() if "df_fa2 = spark.read.table" in line)
+    assert "REVIEW" not in fa2_line
+
+
+def test_render_sdp_per_write_slicing_avoids_cross_branch_duplication() -> None:
+    source = render_sdp(_branching_spec())
+    gold_a = source.split('gold_out_a"')[1].split("@dp.table")[0]
+    gold_b = source.split('gold_out_b"')[1].split("@dp.table")[0]
+    # Each gold table only computes its own branch, not its sibling's.
+    assert "df_branch_a_only" in gold_a
+    assert "df_branch_b_only" not in gold_a
+    assert "df_branch_b_only" in gold_b
+    assert "df_branch_a_only" not in gold_b
+    # Both legitimately share the upstream join/union that feeds them.
+    assert "unionByName" in gold_a
+    assert "unionByName" in gold_b
+
+
+def test_render_sdp_orphaned_gold_step_flagged_for_review() -> None:
+    source = render_sdp(_branching_spec())
+    assert "REVIEW" in source
+    assert "'orphan'" in source
+    assert "never reach a write step" in source
+    # the orphaned step's own body must not silently appear in either output
+    assert "df_orphan = " not in source
+
+
 def test_render_unknown_function_raises() -> None:
     spec = PipelineSpec(
         name="bad_fn", language="pyspark", source=SOURCE, target=TARGET,

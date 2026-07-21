@@ -172,6 +172,13 @@ with st.sidebar:
     known_macros = repo_cache.list_macro_names(_repo())
     if known_macros:
         st.caption("Registered: " + ", ".join(known_macros))
+        macro_to_delete = st.selectbox(
+            "Remove a registered macro", known_macros, key="macro_delete_select"
+        )
+        if st.button("Delete macro", key="macro_delete_btn"):
+            _repo().delete_macro(macro_to_delete)
+            st.success(f"Deleted macro: {macro_to_delete}")
+            st.rerun()
 
     st.divider()
     st.header("Git repository")
@@ -582,6 +589,20 @@ with tab_repo:
         st.markdown("##### Workflow flow")
         canvas_obj = st.selectbox("Show flow for", object_names, key="canvas_object")
         canvas_wf = repo_cache.read_workflow(repo, canvas_obj)
+
+        with st.expander("Delete this object"):
+            st.caption(
+                "Removes the ingested workflow (ir.json/metadata.json) from the repo. "
+                "This does not affect anything already deployed to Databricks."
+            )
+            confirm_delete = st.checkbox(
+                f"I want to permanently delete '{canvas_obj}' from the repo", key="confirm_delete_obj"
+            )
+            if st.button("Delete object", key="delete_obj_btn", disabled=not confirm_delete):
+                repo.delete_object(canvas_obj)
+                st.success(f"Deleted: {canvas_obj}")
+                st.session_state.pop("confirm_delete_obj", None)
+                st.rerun()
 
         converted = len(canvas_wf.nodes)
         manual = len(canvas_wf.unsupported)

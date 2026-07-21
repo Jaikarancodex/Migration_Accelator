@@ -43,6 +43,54 @@ def test_read_missing_object_raises(tmp_path: Path) -> None:
         repo.read_workflow("does_not_exist")
 
 
+def test_delete_object_removes_it_from_the_repo(tmp_path: Path) -> None:
+    workflow = parse_yxmd(FIXTURE)
+    repo = MigrationRepo(tmp_path)
+    repo.write_workflow(workflow)
+    assert repo.list_object_names() == ["sales_summary"]
+
+    repo.delete_object("sales_summary")
+
+    assert repo.list_object_names() == []
+    with pytest.raises(ObjectNotFoundError):
+        repo.read_workflow("sales_summary")
+
+
+def test_delete_object_is_a_noop_when_absent(tmp_path: Path) -> None:
+    repo = MigrationRepo(tmp_path)
+    repo.delete_object("does_not_exist")  # must not raise
+    assert repo.list_object_names() == []
+
+
+def test_delete_object_cannot_escape_the_repo_root(tmp_path: Path) -> None:
+    workflow = parse_yxmd(FIXTURE)
+    repo = MigrationRepo(tmp_path)
+    repo.write_workflow(workflow)
+
+    repo.delete_object("../sales_summary")
+
+    # the object must survive a path-traversal-shaped name
+    assert repo.list_object_names() == ["sales_summary"]
+
+
+def test_delete_macro_removes_it_from_the_registry(tmp_path: Path) -> None:
+    workflow = parse_yxmd(FIXTURE).model_copy(update={"name": "MyMacro"})
+    repo = MigrationRepo(tmp_path)
+    key = repo.write_macro(workflow)
+    assert repo.list_macro_names() == [key]
+
+    repo.delete_macro(key)
+
+    assert repo.list_macro_names() == []
+    with pytest.raises(ObjectNotFoundError):
+        repo.read_macro(key)
+
+
+def test_delete_macro_is_a_noop_when_absent(tmp_path: Path) -> None:
+    repo = MigrationRepo(tmp_path)
+    repo.delete_macro("does_not_exist")  # must not raise
+
+
 def _meta(name: str, inputs: list[str], outputs: list[str]) -> ObjectMetadata:
     return ObjectMetadata(
         name=name, source_system="alteryx", source_file=f"{name}.yxmd",

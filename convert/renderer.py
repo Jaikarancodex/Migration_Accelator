@@ -478,6 +478,43 @@ def _dp_table(name: str, comment: str, body_lines: list[str]) -> str:
     )
 
 
+def _step_refs(step: Step) -> list[str]:
+    """Every other step id this step reads from, across all step types."""
+    refs = [
+        value
+        for attr in ("input", "left", "right", "target", "source")
+        if (value := getattr(step, attr, None)) is not None
+    ]
+    if isinstance(step, UnionStep):
+        refs.extend(step.inputs)
+    return refs
+
+
+def _slice_dependencies(
+    final_id: str, by_id: dict[str, Step], ordered: list[Step]
+) -> tuple[list[Step], set[str]]:
+    """Walk backward from `final_id` through `by_id`'s edges.
+
+    Returns the subset of `ordered` it actually depends on (in original
+    order) plus the set of ids it references outside `by_id` — upstream
+    reads or silver-chain values that aren't part of this slice.
+    """
+    needed: set[str] = set()
+    external: set[str] = set()
+    stack = [final_id]
+    while stack:
+        current = stack.pop()
+        if current in needed:
+            continue
+        step = by_id.get(current)
+        if step is None:
+            external.add(current)
+            continue
+        needed.add(current)
+        stack.extend(_step_refs(step))
+    return [s for s in ordered if s.id in needed], external
+
+
 def render_sdp(spec: PipelineSpec) -> str:
     """Render a spec as a medallion-layered Lakeflow/Spark Declarative Pipeline.
 
@@ -491,8 +528,11 @@ def render_sdp(spec: PipelineSpec) -> str:
       the workflow has no aggregation.
 
     The pipeline runtime owns the writes, so WriteStep's mode is not
-    rendered. Multi-output specs whose outputs branch mid-chain share the
-    silver table; review the gold layer for those.
+    rendered. Each gold table only computes the steps its own write
+    depends on (see `_slice_dependencies`); a gold step that references a
+    silver-chain id other than silver's own return value is approximated
+    with silver's output and marked `# REVIEW` in the generated code, since
+    silver only materializes its final row set, not every intermediate.
     """
     if spec.language != "pyspark":
         raise ValueError(f"render_sdp called with a {spec.language!r} spec")
@@ -502,7 +542,7 @@ def render_sdp(spec: PipelineSpec) -> str:
         raise ValueError(f"Spec {spec.name!r} has no write steps; SDP needs at least one table")
 
     reads = [s for s in spec.steps if isinstance(s, ReadStep)]
-    middle = [s for s in spec.steps if not isinstance(s, ReadStep | WriteStep)]
+    middle: list[Step] = [s for s in spec.steps if not isinstance(s, ReadStep | WriteStep)]
     first_agg_index = next(
         (i for i, s in enumerate(middle) if isinstance(s, AggregateStep)), len(middle)
     )
@@ -556,13 +596,21 @@ def render_sdp(spec: PipelineSpec) -> str:
     silver_body.append(f"return {_var(silver_last)}")
     parts.append(_dp_table(silver, f"Transformed data for {spec.name}", silver_body))
 
-    # Gold: business-level aggregates per output table. Unlike bronze reads,
-    # two WriteSteps landing on the same sanitized name are NOT safe to
-    # merge — they're distinct transform bodies that happen to collide
-    # after sanitization, and silently dropping one would lose an entire
-    # output. Disambiguate with a suffix and flag it for human review.
-    gold_ids = {s.id for s in gold_steps}
+    # Gold: business-level output per write step. Each write's body includes
+    # only the steps it actually depends on (walked backward through the
+    # step graph from its final id), not the entire post-aggregation tail —
+    # sharing one flattened list across every write duplicated unrelated
+    # computation and, when two writes fell back to the same default id,
+    # silently returned identical bodies for genuinely different outputs.
+    # An external reference is resolved to its own bronze table when it's a
+    # direct read; to the silver table when it matches silver's actual
+    # return value; anything else is an intermediate silver-chain value that
+    # silver doesn't expose as its own table, so it's approximated with
+    # silver's output and flagged for human review.
+    gold_by_id: dict[str, Step] = {s.id: s for s in gold_steps}
+    gold_ids = set(gold_by_id)
     used_gold_names: dict[str, int] = {}
+    reachable: set[str] = set()
     for write in writes:
         base = f"gold_{_sdp_table_name(write.target_table)}"
         seen = used_gold_names.get(base, 0)
@@ -574,21 +622,42 @@ def render_sdp(spec: PipelineSpec) -> str:
                 " -- REVIEW: name collided with another write step after "
                 "sanitization; confirm these are genuinely different outputs"
             )
-        body: list[str] = []
-        referenced: set[str] = set()
-        for step in gold_steps:
-            for attr in ("input", "left", "right", "target", "source"):
-                value = getattr(step, attr, None)
-                if value is not None and value not in gold_ids:
-                    referenced.add(value)
         if gold_steps:
-            for upstream_id in sorted(referenced):
-                body.append(f'{_var(upstream_id)} = spark.read.table("{silver}")')
-            body.extend(_render_step(step) for step in gold_steps)
             final = write.input if write.input in gold_ids else gold_steps[-1].id
+            if write.input not in gold_ids:
+                comment += (
+                    " -- REVIEW: write step's input did not match any "
+                    "post-aggregation step id; fell back to the last computed "
+                    "step, verify this is the intended output"
+                )
+            steps_needed, external_ids = _slice_dependencies(final, gold_by_id, gold_steps)
+            reachable.update(s.id for s in steps_needed)
+            body: list[str] = []
+            for upstream_id in sorted(external_ids):
+                if upstream_id in bronze_names:
+                    body.append(
+                        f'{_var(upstream_id)} = spark.read.table("{bronze_names[upstream_id]}")'
+                    )
+                elif upstream_id == silver_last:
+                    body.append(f'{_var(upstream_id)} = spark.read.table("{silver}")')
+                else:
+                    body.append(
+                        f'{_var(upstream_id)} = spark.read.table("{silver}")  '
+                        f"# REVIEW: {upstream_id!r} is an intermediate value from the "
+                        f"silver chain, not its final output — verify this substitution"
+                    )
+            body.extend(_render_step(step) for step in steps_needed)
             body.append(f"return {_var(final)}")
         else:
-            body.append(f'return spark.read.table("{silver}")')
+            body = [f'return spark.read.table("{silver}")']
         parts.append(_dp_table(gold, comment, body))
+
+    orphaned = [s.id for s in gold_steps if s.id not in reachable]
+    if orphaned:
+        parts.append(
+            f"\n# REVIEW: step(s) {orphaned} are computed after aggregation but never "
+            "reach a write step in this spec — an output branch may be missing from "
+            "the spec; verify against the source workflow."
+        )
 
     return "\n".join(parts) + "\n"
