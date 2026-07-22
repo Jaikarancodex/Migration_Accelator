@@ -3,23 +3,27 @@ bundle:
 variables:
   catalog:
     description: Target catalog
-    default: workspace
+    default: migration_accelator
   schema:
     description: Target schema
-    default: default
+    default: testing
 resources:
-  jobs:
-    LS_Certifications_DEV_Load_job:
-      name: LS_Certifications_DEV_Load_job
-      tasks:
-      - task_key: LS_Certifications_DEV_Load
-        notebook_task:
-          notebook_path: ./src/LS_Certifications_DEV_Load.py
+  pipelines:
+    LS_Certifications_DEV_Load_pipeline:
+      name: LS_Certifications_DEV_Load_pipeline
+      catalog: migration_accelator
+      schema: testing
+      serverless: true
+      libraries:
+      - file:
+          path: ./src/LS_Certifications_DEV_Load.py
+      - file:
+          path: ./src/ls_certifications_dev_load_utils.py
 targets:
   default:
     mode: development
     workspace:
-      host: https://dbc-922a9e09-b3e2.cloud.databricks.com
+      host: https://dbc-7e2fd23b-42d1.cloud.databricks.com/
     variables:
-      catalog: workspace
-      schema: default
+      catalog: migration_accelator
+      schema: testing
