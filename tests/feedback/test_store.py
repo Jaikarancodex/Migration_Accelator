@@ -130,3 +130,19 @@ def test_code_corrections_log_find_and_noop(tmp_path: Path) -> None:
     # format=None returns this workflow's edits across formats, newest first
     all_wf = find_code_corrections("wf", store_path=store)
     assert [r.artifact_format for r in all_wf] == ["job", "sdp"]
+
+
+def test_latest_code_correction_returns_most_recent_match(tmp_path: Path) -> None:
+    from feedback.store import latest_code_correction, log_code_correction
+
+    store = tmp_path / "code.jsonl"
+    assert latest_code_correction("wf", "sdp", store_path=store) is None
+    log_code_correction("wf", "sdp", "gen1", "edit1", store_path=store)
+    log_code_correction("wf", "sdp", "gen2", "edit2", store_path=store)
+    log_code_correction("wf", "job", "genJ", "editJ", store_path=store)
+
+    latest = latest_code_correction("wf", "sdp", store_path=store)
+    assert latest is not None and latest.edited_code == "edit2"  # most recent sdp
+    job = latest_code_correction("wf", "job", store_path=store)
+    assert job is not None and job.edited_code == "editJ"
+    assert latest_code_correction("wf", "notebook", store_path=store) is None

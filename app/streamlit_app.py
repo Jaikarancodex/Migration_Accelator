@@ -74,6 +74,7 @@ from feedback.store import (
     deploy_error_counts_by_stage,
     find_code_corrections,
     find_similar_corrections,
+    latest_code_correction,
     log_code_correction,
     log_conversion_triple,
     log_deploy_error,
@@ -327,6 +328,22 @@ def _render_artifact_preview(spec: PipelineSpec, artifact_format: ArtifactFormat
     utility_code = render_utility_module(spec)
     override_key = f"code_override::{spec.name}::{artifact_format}"
     override = st.session_state.get(override_key)
+    reapplied = False
+    # No session override (e.g. fresh re-upload)? Re-apply a saved manual edit
+    # from disk, but only when the freshly-generated code is byte-identical to
+    # what that edit was made against — otherwise the renderer/spec changed
+    # underneath it and replaying a stale hand-fix would be wrong.
+    if override is None:
+        saved = latest_code_correction(spec.name, artifact_format)
+        if saved is not None and saved.generated_code.strip() == main_code.strip():
+            override = saved.edited_code
+            st.session_state[override_key] = override
+            reapplied = True
+        elif saved is not None:
+            st.info(
+                "You previously hand-edited this format's code, but the generated "
+                "version has since changed — review and re-save if the fix still applies."
+            )
     deployed_code = override or main_code
 
     # The renderer marks anything it could not translate with certainty
@@ -347,7 +364,9 @@ def _render_artifact_preview(spec: PipelineSpec, artifact_format: ArtifactFormat
             st.code("\n".join(review_lines), language="python")
 
     if override:
-        st.info(
+        st.success(
+            "Re-applied your saved manual edit for this workflow — deploys use it."
+            if reapplied else
             "Manual code edits are active for this format — deploys use your "
             "edited version, not the regenerated one."
         )
@@ -408,6 +427,20 @@ def _render_artifact_preview(spec: PipelineSpec, artifact_format: ArtifactFormat
                         "Code edits saved and logged — deploys now use your version."
                     )
                 st.rerun()
+
+    dl1, dl2 = st.columns(2)
+    stem = utils_module_name(spec).rsplit("_utils", 1)[0]
+    dl1.download_button(
+        "Download main .py", data=deployed_code,
+        file_name=f"{stem}.py", mime="text/x-python",
+        key=f"{key}::dl_main::{artifact_format}",
+    )
+    if utility_code is not None:
+        dl2.download_button(
+            "Download utils .py", data=utility_code,
+            file_name=f"{utils_module_name(spec)}.py", mime="text/x-python",
+            key=f"{key}::dl_util::{artifact_format}",
+        )
 
     past_edits = find_code_corrections(spec.name, artifact_format)
     if past_edits:

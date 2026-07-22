@@ -211,6 +211,23 @@ def code_correction_count(store_path: Path | None = None) -> int:
     return len(_load_code_records(store_path))
 
 
+def latest_code_correction(
+    workflow_name: str, artifact_format: str, store_path: Path | None = None
+) -> CodeCorrectionRecord | None:
+    """The most recent manual code edit for this workflow+format, if any.
+
+    Used to re-apply a saved edit when the same workflow is reopened or
+    re-uploaded — the deterministic converter can't 'learn' the edit, so
+    persisting and replaying it is how a hand-fix survives regeneration.
+    """
+    matches = [
+        r
+        for r in _load_code_records(store_path)
+        if r.workflow_name == workflow_name and r.artifact_format == artifact_format
+    ]
+    return matches[-1] if matches else None
+
+
 def summarize_code_correction(record: CodeCorrectionRecord, max_lines: int = 24) -> str:
     """A short unified diff of the manual code edit, for reviewer hints."""
     diff = list(
