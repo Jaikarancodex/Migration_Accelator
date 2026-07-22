@@ -6,3 +6,6 @@ staging_host: https://adb-000000000000000.0.azuredatabricks.net
 prod_host: https://adb-000000000000000.0.azuredatabricks.net
 catalog: main
 schema_name: migration
+# Single-workspace default (Databricks Free Edition) used by the wizard and
+# the advanced tab's quick-deploy flow.
+wizard_host: https://dbc-922a9e09-b3e2.cloud.databricks.com

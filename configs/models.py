@@ -24,3 +24,8 @@ class DeployDefaultsConfig(BaseModel):
     prod_host: str
     catalog: str
     schema_name: str
+    # Single-workspace deploy path (Databricks Free Edition, no dev/staging/
+    # prod promotion): the one host used across the wizard and the advanced
+    # tab's quick-deploy flow. Kept separate from dev_host/staging_host/
+    # prod_host, which are for the multi-target Azure bundle path.
+    wizard_host: str = ""

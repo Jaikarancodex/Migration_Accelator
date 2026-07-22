@@ -818,7 +818,7 @@ with tab_quick:
             spec = st.session_state["wiz_spec"]
             fmt = cast(ArtifactFormat, st.session_state["wiz_format"])
             wiz_host = st.text_input(
-                "Workspace URL", value="https://dbc-922a9e09-b3e2.cloud.databricks.com",
+                "Workspace URL", value=DEPLOY_DEFAULTS.wizard_host,
                 key="wiz_host",
             )
             wiz_env_token = os.environ.get("DATABRICKS_TOKEN", "")
@@ -901,7 +901,7 @@ with tab_quick:
                 (s.target_table for s in spec.steps if s.op == "write"),
                 f"{spec.target.catalog}.{spec.target.schema_}.output",
             )
-            wiz_host = st.session_state.get("wiz_host", "https://dbc-922a9e09-b3e2.cloud.databricks.com")
+            wiz_host = st.session_state.get("wiz_host", DEPLOY_DEFAULTS.wizard_host)
             wiz_token = os.environ.get("DATABRICKS_TOKEN", "") or st.text_input(
                 "Access token", type="password", key="wiz_verify_token"
             )
@@ -1276,7 +1276,7 @@ with tab_parity:
     pc1, pc2 = st.columns(2)
     parity_host = pc1.text_input(
         "Databricks workspace URL",
-        value="https://dbc-922a9e09-b3e2.cloud.databricks.com",
+        value=DEPLOY_DEFAULTS.wizard_host,
         key="parity_host",
     )
     parity_env_token = os.environ.get("DATABRICKS_TOKEN", "")
@@ -1441,12 +1441,28 @@ with tab_deploy:
             dev_host = st.text_input("Dev host", value=DEPLOY_DEFAULTS.dev_host)
             staging_host = st.text_input("Staging host", value=DEPLOY_DEFAULTS.staging_host)
             prod_host = st.text_input("Prod host", value=DEPLOY_DEFAULTS.prod_host)
+            # Which of the three the "One-click migrate & deploy" button below
+            # actually targets — previously it silently always used dev_host,
+            # with no way to deploy the same job/SDP to staging or prod.
+            deploy_env = st.selectbox("Deploy environment", ["dev", "staging", "prod"])
+            _env_hosts = {"dev": dev_host, "staging": staging_host, "prod": prod_host}
+            deploy_host = _env_hosts[deploy_env]
+            # Mirrors default_bundle()'s convention: dev/staging get a
+            # suffixed schema, prod uses the bare one.
+            deploy_schema = (
+                DEPLOY_DEFAULTS.schema_name
+                if deploy_env == "prod"
+                else f"{DEPLOY_DEFAULTS.schema_name}_{deploy_env}"
+            )
         else:
             free_host = st.text_input(
                 "Workspace host",
-                value="https://dbc-922a9e09-b3e2.cloud.databricks.com",
+                value=DEPLOY_DEFAULTS.wizard_host,
                 help="Your Databricks Free Edition workspace URL.",
             )
+            deploy_env = "default"
+            deploy_host = free_host
+            deploy_schema = DEPLOY_DEFAULTS.schema_name
 
         if st.button("Generate databricks.yml"):
             if deploy_style.startswith("Azure"):
@@ -1483,7 +1499,10 @@ with tab_deploy:
         if deploy_spec is None:
             st.info("Generate a spec in the Convert tab first — then this deploys it in one click.")
         else:
-            deploy_host = free_host if deploy_style.startswith("Databricks Free") else dev_host
+            st.caption(
+                f"Target: **{deploy_env}** — `{deploy_host}`, schema `{deploy_schema}`."
+                + (" Same as your Convert-step schema." if deploy_env == "default" else "")
+            )
             env_token = os.environ.get("DATABRICKS_TOKEN", "")
             token = env_token or st.text_input(
                 "Databricks access token",
@@ -1498,24 +1517,55 @@ with tab_deploy:
                 if not token:
                     st.error("A Databricks access token is required.")
                 else:
+                    # A dev/staging/prod pick re-targets the spec's own schema too
+                    # — for job/notebook the table names are literal in the
+                    # generated code, so only re-pointing the DAB host would
+                    # deploy correct code to the wrong environment's schema.
+                    env_spec = (
+                        deploy_spec
+                        if deploy_env == "default"
+                        else deploy_spec.model_copy(
+                            update={
+                                "target": deploy_spec.target.model_copy(
+                                    update={"schema_": deploy_schema}
+                                )
+                            }
+                        )
+                    )
                     safe_name = re.sub(r"\W+", "_", selected).strip("_").lower()
-                    bundle_dir = _ROOT / "bundles" / safe_name
+                    env_suffix = "" if deploy_env == "default" else f"_{deploy_env}"
+                    bundle_dir = _ROOT / "bundles" / f"{safe_name}{env_suffix}"
+                    # A saved manual code edit was captured against one specific
+                    # rendering; reusing it verbatim under a different schema
+                    # would deploy the old environment's table names, so it only
+                    # auto-applies to the single-workspace (default) target.
+                    code_override = (
+                        st.session_state.get(f"code_override::{deploy_spec.name}::{artifact_format}")
+                        if deploy_env == "default"
+                        else None
+                    )
+                    if deploy_env != "default" and st.session_state.get(
+                        f"code_override::{deploy_spec.name}::{artifact_format}"
+                    ):
+                        st.warning(
+                            "A saved manual code edit exists but targets a different schema — "
+                            "not auto-applied here. Re-check the Generated code tab for this "
+                            "environment if that fix still applies."
+                        )
                     with st.spinner("Rendering artifact and writing bundle..."):
                         export_bundle_from_spec(
-                            deploy_spec,
+                            env_spec,
                             bundle_dir,
                             workspace_host=deploy_host,
                             artifact_format=artifact_format,
-                            bundle_name=bundle_name,
-                            main_code_override=st.session_state.get(
-                                f"code_override::{deploy_spec.name}::{artifact_format}"
-                            ),
+                            bundle_name=f"{bundle_name}{env_suffix}",
+                            main_code_override=code_override,
                         )
                     with st.spinner(f"Deploying to {deploy_host} ..."):
                         ok, log = deploy_bundle(bundle_dir, deploy_host, token)
                     st.code(log)
                     if ok:
-                        st.success(f"Deployed. Bundle written to `bundles/{safe_name}/`.")
+                        st.success(f"Deployed. Bundle written to `bundles/{safe_name}{env_suffix}/`.")
                         _push_bundle_to_git(bundle_dir, selected)
                     else:
                         log_deploy_error(selected, "deploy", log)
@@ -1540,9 +1590,10 @@ with tab_deploy:
                     st.error("A Databricks access token is required.")
                 else:
                     safe_name = re.sub(r"\W+", "_", selected).strip("_").lower()
-                    bundle_dir = _ROOT / "bundles" / safe_name
+                    env_suffix = "" if deploy_env == "default" else f"_{deploy_env}"
+                    bundle_dir = _ROOT / "bundles" / f"{safe_name}{env_suffix}"
                     if not (bundle_dir / "databricks.yml").exists():
-                        st.error("Deploy first — no bundle found for this object.")
+                        st.error(f"Deploy to {deploy_env} first — no bundle found for this object.")
                     else:
                         with st.spinner("Running job (waits for completion)..."):
                             ok, log = run_bundle_job(bundle_dir, deploy_host, token)
