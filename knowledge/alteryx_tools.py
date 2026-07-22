@@ -85,6 +85,7 @@ CATALOG: list[ToolMapping] = [
         databricks_logic="Window functions: F.lag/F.lead over Window.partitionBy(...).orderBy(...) "
         "for [Row-1:Field] references; F.sum(...).over(w.rowsBetween(Window.unboundedPreceding, 0)) "
         "for running totals; F.last(col, ignorenulls=True) over a window for fill-down.",
+        parser_supported=True,
     ),
     ToolMapping(
         tool="Multi-Field Formula",
@@ -94,6 +95,7 @@ CATALOG: list[ToolMapping] = [
         databricks_logic="df.select([F.expr(expression.replace('[_CurrentField_]', f'`{c}`'))"
         ".alias(c) if c in targets else F.col(c) for c in df.columns]) — expand the template "
         "expression per target column.",
+        parser_supported=True,
     ),
     ToolMapping(
         tool="Sort",

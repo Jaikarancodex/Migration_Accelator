@@ -173,6 +173,39 @@ class CleanseStep(BaseModel):
     case: Literal["upper", "lower", "title"] | None = None
 
 
+class MultiFieldFormulaStep(BaseModel):
+    """Alteryx Multi-Field Formula: one expression applied to several fields.
+
+    `expression` uses `[_CurrentField_]` for each field's value. output_prefix
+    None replaces in place; otherwise the result lands in prefix+field.
+    """
+
+    op: Literal["multi_field_formula"] = "multi_field_formula"
+    id: str
+    input: str
+    fields: list[str]
+    expression: str
+    output_prefix: str | None = None
+
+
+class MultiRowFormulaStep(BaseModel):
+    """Alteryx Multi-Row Formula: a field computed across neighbouring rows.
+
+    `expression` references other rows as `[Row-1:Field]` / `[Row+1:Field]`,
+    rendered as LAG/LEAD window functions partitioned by `group_by`. Alteryx
+    uses record order; the renderer orders by a synthesized row-order column
+    and flags it for review.
+    """
+
+    op: Literal["multi_row_formula"] = "multi_row_formula"
+    id: str
+    input: str
+    field: str
+    expression: str
+    group_by: list[str] = Field(default_factory=list)
+    num_rows: int = 1
+
+
 class AggregateStep(BaseModel):
     op: Literal["aggregate"] = "aggregate"
     id: str
@@ -214,6 +247,8 @@ Step = Annotated[
     | PythonScriptStep
     | FindReplaceStep
     | AppendFieldsStep
+    | MultiFieldFormulaStep
+    | MultiRowFormulaStep
     | AggregateStep
     | CallFunctionStep
     | WriteStep,

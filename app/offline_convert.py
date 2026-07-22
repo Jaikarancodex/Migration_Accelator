@@ -31,6 +31,8 @@ from convert.spec import (
     JoinStep,
     MacroCallStep,
     MacroUtility,
+    MultiFieldFormulaStep,
+    MultiRowFormulaStep,
     PipelineSpec,
     PythonScriptStep,
     ReadStep,
@@ -516,6 +518,29 @@ class _Converter:
             ]
             return AggregateStep(
                 id=node.tool_id, input=self._input_id(node), group_by=group_by, aggregations=aggregations
+            )
+
+        if node.tool_type == ToolType.MULTI_FIELD_FORMULA:
+            if node.multi_field is None:
+                self._elided[node.tool_id] = self._input_id(node)
+                return None
+            return MultiFieldFormulaStep(
+                id=node.tool_id, input=self._input_id(node),
+                fields=node.multi_field.fields,
+                expression=node.multi_field.expression,
+                output_prefix=node.multi_field.output_prefix,
+            )
+
+        if node.tool_type == ToolType.MULTI_ROW_FORMULA:
+            if node.multi_row is None:
+                self._elided[node.tool_id] = self._input_id(node)
+                return None
+            return MultiRowFormulaStep(
+                id=node.tool_id, input=self._input_id(node),
+                field=node.multi_row.field,
+                expression=node.multi_row.expression,
+                group_by=node.multi_row.group_by,
+                num_rows=node.multi_row.num_rows,
             )
 
         if node.tool_type == ToolType.OUTPUT:

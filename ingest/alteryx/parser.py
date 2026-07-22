@@ -27,6 +27,8 @@ from ingest.alteryx.ir import (
     FindReplaceConfig,
     FormulaExpression,
     JoinInput,
+    MultiFieldConfig,
+    MultiRowConfig,
     Node,
     SortField,
     SummarizeAction,
@@ -66,6 +68,8 @@ _PLUGIN_TOOL_TYPES: dict[str, ToolType] = {
     "FindReplace.FindReplace": ToolType.FIND_REPLACE,
     "AppendFields.AppendFields": ToolType.APPEND_FIELDS,
     "Summarize.Summarize": ToolType.SUMMARIZE,
+    "MultiFieldFormula.MultiFieldFormula": ToolType.MULTI_FIELD_FORMULA,
+    "MultiRowFormula.MultiRowFormula": ToolType.MULTI_ROW_FORMULA,
     "DbFileOutput.DbFileOutput": ToolType.OUTPUT,
 }
 
@@ -102,6 +106,55 @@ def _text(elem: Element | None) -> str | None:
     if elem is None or elem.text is None:
         return None
     return elem.text.strip() or None
+
+
+def _parse_multi_field(config: Element) -> MultiFieldConfig | None:
+    """Multi-Field Formula: selected fields + one [_CurrentField_] expression."""
+    expression = _text(config.find("Expression"))
+    if expression is None:
+        return None
+    fields = [
+        name
+        for f in config.findall(".//Fields/Field")
+        if (name := f.get("name") or f.get("field"))
+    ]
+    if not fields:
+        return None
+    # "Copy Output Fields and Add" creates new fields with this prefix; absent
+    # or blank means the formula replaces each field in place.
+    prefix_elem = config.find("OutputFieldPrefix")
+    prefix = (prefix_elem.text or "").strip() if prefix_elem is not None else ""
+    copy_output = config.find("CopyOutput")
+    add_new = copy_output is not None and (copy_output.get("value") or "").lower() == "true"
+    return MultiFieldConfig(
+        fields=fields, expression=expression,
+        output_prefix=(prefix or "New_") if (add_new or prefix) else None,
+    )
+
+
+def _parse_multi_row(config: Element) -> MultiRowConfig | None:
+    """Multi-Row Formula: field + expression referencing [Row-N:Field]."""
+    expression = _text(config.find("Expression"))
+    if expression is None:
+        return None
+    update_name = _text(config.find("UpdateField_Name")) or _text(config.find("UpdateField"))
+    create_name = _text(config.find("CreateField_Name")) or _text(config.find("CreateField"))
+    field = update_name or create_name
+    if not field:
+        return None
+    group_by = [
+        name
+        for f in config.findall(".//GroupByFields/Field")
+        if (name := f.get("name") or f.get("field"))
+    ]
+    num_rows_elem = config.find("NumRows")
+    num_rows = 1
+    if num_rows_elem is not None:
+        with contextlib.suppress(ValueError, TypeError):
+            num_rows = int(num_rows_elem.get("value") or num_rows_elem.text or 1)
+    return MultiRowConfig(
+        field=field, expression=expression, group_by=group_by, num_rows=max(1, num_rows)
+    )
 
 
 def _parse_select(config: Element) -> list[FieldSelection]:
@@ -352,6 +405,10 @@ def _parse_node(
         node.find_replace = _parse_find_replace(config)
     elif tool_type == ToolType.SUMMARIZE:
         node.summarize_actions = _parse_summarize(config)
+    elif tool_type == ToolType.MULTI_FIELD_FORMULA:
+        node.multi_field = _parse_multi_field(config)
+    elif tool_type == ToolType.MULTI_ROW_FORMULA:
+        node.multi_row = _parse_multi_row(config)
     elif tool_type == ToolType.OUTPUT:
         node.output_path = _text(config.find("File"))
         node.output_mode = _parse_output_mode(config)

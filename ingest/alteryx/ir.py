@@ -31,6 +31,8 @@ class ToolType(StrEnum):
     FIND_REPLACE = "find_replace"
     APPEND_FIELDS = "append_fields"
     SUMMARIZE = "summarize"
+    MULTI_FIELD_FORMULA = "multi_field_formula"
+    MULTI_ROW_FORMULA = "multi_row_formula"
     OUTPUT = "output"
     UNSUPPORTED = "unsupported"
 
@@ -85,6 +87,34 @@ class CleanseConfig(BaseModel):
     nulls_to_blank: bool = False
     numeric_nulls_to_zero: bool = False
     case: str | None = None  # "upper" | "lower" | "title"
+
+
+class MultiFieldConfig(BaseModel):
+    """Alteryx Multi-Field Formula: one expression applied to several fields.
+
+    The expression uses `[_CurrentField_]` for each field's value. When
+    `output_prefix` is set the result lands in a new field (prefix + name);
+    otherwise it replaces the field in place.
+    """
+
+    fields: list[str]
+    expression: str
+    output_prefix: str | None = None
+
+
+class MultiRowConfig(BaseModel):
+    """Alteryx Multi-Row Formula: a field computed from neighbouring rows.
+
+    The expression references other rows as `[Row-1:Field]` / `[Row+1:Field]`;
+    `group_by` restarts the calculation per group. Alteryx evaluates in record
+    order, which Spark has no inherent notion of — the renderer flags the
+    ordering it assumes.
+    """
+
+    field: str
+    expression: str
+    group_by: list[str] = Field(default_factory=list)
+    num_rows: int = 1
 
 
 class SummarizeAction(BaseModel):
@@ -142,6 +172,8 @@ class Node(BaseModel):
         default_factory=dict, description="Connection label -> origin tool id (e.g. Left/Right)"
     )
     summarize_actions: list[SummarizeAction] = Field(default_factory=list)  # SUMMARIZE
+    multi_field: MultiFieldConfig | None = None  # MULTI_FIELD_FORMULA
+    multi_row: MultiRowConfig | None = None  # MULTI_ROW_FORMULA
     output_path: str | None = None  # OUTPUT
     output_mode: str | None = None  # OUTPUT: "overwrite" | "append" | "merge" (from Output Option)
 

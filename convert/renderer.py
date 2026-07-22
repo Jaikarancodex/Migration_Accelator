@@ -22,6 +22,8 @@ from convert.spec import (
     FindReplaceStep,
     JoinStep,
     MacroCallStep,
+    MultiFieldFormulaStep,
+    MultiRowFormulaStep,
     PipelineSpec,
     PythonScriptStep,
     ReadStep,
@@ -307,6 +309,60 @@ _AGG_FUNCS = {
 }
 
 
+_CURRENT_FIELD = re.compile(r"\[_CurrentField_\]", re.IGNORECASE)
+_CURRENT_FIELD_NAME = re.compile(r"\[_CurrentFieldName_\]", re.IGNORECASE)
+_ROW_REF = re.compile(r"\[Row([+-]\d+):([^\]]+)\]", re.IGNORECASE)
+
+
+def _render_multi_field_formula(step: MultiFieldFormulaStep) -> str:
+    """One expression applied to each field, with [_CurrentField_] substituted."""
+    lines = [f"{_var(step.id)} = {_var(step.input)}"]
+    for field in step.fields:
+        # substitute the per-field placeholders, then translate as a normal expr
+        expr_src = _CURRENT_FIELD.sub(f"[{field}]", step.expression)
+        expr_src = _CURRENT_FIELD_NAME.sub(f"'{field}'", expr_src)
+        expr = alteryx_expr_to_spark(expr_src)
+        out = f"{step.output_prefix}{field}" if step.output_prefix else field
+        lines.append(
+            f'{_var(step.id)} = {_var(step.id)}.withColumn("{out}", F.expr({expr!r}))'
+            f"{_review_suffix(expr)}"
+        )
+    return "\n".join(lines)
+
+
+def _render_multi_row_formula(step: MultiRowFormulaStep) -> str:
+    """A field computed from neighbouring rows via LAG/LEAD window functions.
+
+    [Row-n:F] -> LAG(F, n) OVER (PARTITION BY group ORDER BY <row order>),
+    [Row+n:F] -> LEAD(...). Alteryx uses incoming record order, which Spark
+    lacks, so a synthesized row-order column is used and flagged for review.
+    """
+    partition = ", ".join(f"`{g}`" for g in step.group_by)
+    over = (
+        f"PARTITION BY {partition} ORDER BY `__row_order`"
+        if partition
+        else "ORDER BY `__row_order`"
+    )
+
+    def _row_ref(match: re.Match[str]) -> str:
+        offset = int(match.group(1))
+        field = match.group(2).strip()
+        fn = "LAG" if offset < 0 else "LEAD"
+        return f"{fn}(`{field}`, {abs(offset)}) OVER ({over})"
+
+    expr_src = _ROW_REF.sub(_row_ref, step.expression)
+    expr = alteryx_expr_to_spark(expr_src)
+    var = _var(step.id)
+    return (
+        f'{var} = {_var(step.input)}.withColumn("__row_order", F.monotonically_increasing_id())'
+        "  # REVIEW: Alteryx used incoming record order; confirm this ordering column "
+        "reproduces it (use an explicit sort key if the source has one)\n"
+        f'{var} = {var}.withColumn("{step.field}", F.expr({expr!r}))'
+        f"{_review_suffix(expr)}\n"
+        f'{var} = {var}.drop("__row_order")'
+    )
+
+
 def _render_aggregate(step: AggregateStep) -> str:
     group_by = ", ".join(f'"{g}"' for g in step.group_by)
     aggs = []
@@ -367,6 +423,8 @@ _RENDERERS: dict[type, Callable[[Any], str]] = {
     PythonScriptStep: _render_python_script,
     FindReplaceStep: _render_find_replace,
     AppendFieldsStep: _render_append_fields,
+    MultiFieldFormulaStep: _render_multi_field_formula,
+    MultiRowFormulaStep: _render_multi_row_formula,
     AggregateStep: _render_aggregate,
     CallFunctionStep: _render_call_function,
 }
@@ -418,6 +476,13 @@ def _spec_column_names(spec: PipelineSpec) -> set[str]:
         elif isinstance(step, JoinStep):
             names.update(step.left_keys)
             names.update(step.right_keys)
+        elif isinstance(step, MultiFieldFormulaStep):
+            names.update(step.fields)
+            if step.output_prefix:
+                names.update(f"{step.output_prefix}{f}" for f in step.fields)
+        elif isinstance(step, MultiRowFormulaStep):
+            names.add(step.field)
+            names.update(step.group_by)
     return names
 
 
