@@ -59,10 +59,16 @@ def _render_select(step: SelectStep) -> str:
     for col in step.columns:
         if col.drop:
             continue
+        expr = f'F.col("{col.column}")'
+        if col.cast_type:
+            expr = f'{expr}.cast("{col.cast_type}")'
         if col.rename:
-            exprs.append(f'F.col("{col.column}").alias("{col.rename}")')
-        else:
-            exprs.append(f'F.col("{col.column}")')
+            expr = f'{expr}.alias("{col.rename}")'
+        elif col.cast_type:
+            # a cast without an explicit rename must keep the original name,
+            # or .select() would emit it as CAST(...) and lose the column name
+            expr = f'{expr}.alias("{col.column}")'
+        exprs.append(expr)
     cols = ", ".join(exprs)
     return f"{_var(step.id)} = {_var(step.input)}.select({cols})"
 

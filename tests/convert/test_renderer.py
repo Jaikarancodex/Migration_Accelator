@@ -559,3 +559,30 @@ def test_extended_summarize_aggregations_render() -> None:
     assert 'F.stddev("amt").alias("sd")' in source
     assert 'F.countDistinct("amt").alias("uniq")' in source
     assert 'F.first("amt").alias("f")' in source
+
+
+def test_select_renders_type_casts_preserving_names() -> None:
+    spec = PipelineSpec(
+        name="casts", language="pyspark", source=SOURCE, target=TARGET,
+        steps=[
+            ReadStep(id="r", source_table="t", alias="t"),
+            SelectStep(
+                id="s", input="r",
+                columns=[
+                    ColumnSelection(column="Amount", cast_type="double"),
+                    ColumnSelection(column="Id", rename="CustId", cast_type="int"),
+                    ColumnSelection(column="Name"),
+                ],
+            ),
+            WriteStep(id="w", input="s", target_table="main.x.casts"),
+        ],
+    )
+    source = render_pyspark(spec)
+    compile(source, "<g>", "exec")
+    # cast without rename keeps the original column name
+    assert 'F.col("Amount").cast("double").alias("Amount")' in source
+    # cast with rename keeps the rename
+    assert 'F.col("Id").cast("int").alias("CustId")' in source
+    # no cast -> untouched
+    assert 'F.col("Name")' in source
+    assert 'F.col("Name").cast' not in source

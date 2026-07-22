@@ -22,6 +22,7 @@ class ColumnSelection(BaseModel):
     column: str
     rename: str | None = None
     drop: bool = False
+    cast_type: str | None = None  # Spark type to cast to (Alteryx Select type change)
 
 
 class ComputedColumn(BaseModel):

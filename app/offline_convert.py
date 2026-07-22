@@ -47,6 +47,23 @@ from convert.spec import (
 )
 from ingest.alteryx.ir import Node, ToolType, Workflow
 
+# Alteryx Select field types -> Spark SQL cast targets. Unknown/empty types
+# map to None (no cast emitted) rather than a guessed type.
+_ALTERYX_TYPE_MAP = {
+    "byte": "tinyint", "int16": "smallint", "int32": "int", "int64": "bigint",
+    "fixeddecimal": "decimal", "float": "float", "double": "double",
+    "bool": "boolean", "string": "string", "v_string": "string",
+    "wstring": "string", "v_wstring": "string", "date": "date",
+    "datetime": "timestamp", "time": "string", "spatialobj": "binary",
+}
+
+
+def _spark_type(alteryx_type: str | None) -> str | None:
+    if not alteryx_type:
+        return None
+    return _ALTERYX_TYPE_MAP.get(alteryx_type.strip().lower())
+
+
 _AGG_FUNC_MAP = {
     "sum": "sum", "count": "count", "avg": "avg", "min": "min", "max": "max",
     "first": "first", "last": "last", "stddev": "stddev", "std": "stddev",
@@ -333,7 +350,10 @@ class _Converter:
                 self._elided[node.tool_id] = self._input_id(node)
                 return None
             columns = [
-                ColumnSelection(column=f.field, rename=f.rename, drop=not f.selected)
+                ColumnSelection(
+                    column=f.field, rename=f.rename, drop=not f.selected,
+                    cast_type=_spark_type(f.new_type),
+                )
                 for f in listed
             ]
             return SelectStep(id=node.tool_id, input=self._input_id(node), columns=columns)
