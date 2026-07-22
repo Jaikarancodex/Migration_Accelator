@@ -9,27 +9,27 @@ from pyspark.sql import functions as F  # noqa: N812
 
 from pyspark import pipelines as dp
 
-@dp.table(name="bronze_todo_source_28", comment="Raw landing of migration_accelator.testing.todo_source_28", table_properties={"delta.columnMapping.mode": "name"})
+@dp.table(name="bronze_todo_source_28", comment="Raw landing of main.migration_dev.todo_source_28", table_properties={"delta.columnMapping.mode": "name"})
 def bronze_todo_source_28():  # noqa: ANN201
-    return spark.read.table("migration_accelator.testing.todo_source_28")
+    return spark.read.table("main.migration_dev.todo_source_28")
 
 @dp.table(name="silver_W3", comment="Transformed data for W3", table_properties={"delta.columnMapping.mode": "name"})
 def silver_W3():  # noqa: ANN201
     df_src_28 = spark.read.table("bronze_todo_source_28")
     df_28 = df_src_28
-    df_28 = df_28.withColumn("SnapShotDate", F.current_timestamp())
+    df_28 = df_28.withColumn("SnapShotDate", F.current_date())
     df_28 = df_28.withColumn("ProjectCube_Data[Redbox Customer]", F.expr('LEFT(`ProjectCube_Data[Redbox Customer]`,30)'))
     df_28 = df_28.withColumn("ProjectCube_Data[Account_ID]", F.expr('LEFT(`ProjectCube_Data[Account_ID]`,30)'))
     df_28 = df_28.withColumn("ProjectCube_Data[Source_ID]", F.expr('LEFT(`ProjectCube_Data[Source_ID]`,15)'))
     df_28 = df_28.withColumn("ProjectCube_Data[GIC]", F.expr('LEFT(`ProjectCube_Data[GIC]`,50)'))
     df_28 = df_28.withColumn("ProjectCube_Data[Legal Entity]", F.expr('LEFT(`ProjectCube_Data[Legal Entity]`,30)'))
-    df_27 = df_28.select(F.col("ProjectCube_Data[Scenario]").alias("Scenario"), F.col("ProjectCube_Data[NokiaPeriod]").alias("NokiaPeriod"), F.col("ProjectCube_Data[Account_ID]").alias("Account_ID"), F.col("ProjectCube_Data[Source_ID]").alias("Source_ID"), F.col("ProjectCube_Data[Redbox Customer]").alias("Redbox Customer"), F.col("ProjectCube_Data[GIC]").alias("GIC"), F.col("ProjectCube_Data[TopWBS]").alias("TopWBS"), F.col("ProjectCube_Data[Legal Entity]").alias("Legal Entity"), F.col("[Base_Measure]").alias("Base_Measure"), F.col("SnapShotDate"))
+    df_27 = df_28.select(F.col("ProjectCube_Data[Scenario]").alias("Scenario"), F.col("ProjectCube_Data[NokiaPeriod]").alias("NokiaPeriod"), F.col("ProjectCube_Data[Account_ID]").alias("Account_ID"), F.col("ProjectCube_Data[Source_ID]").alias("Source_ID"), F.col("ProjectCube_Data[Redbox Customer]").alias("Redbox Customer"), F.col("ProjectCube_Data[GIC]").alias("GIC"), F.col("ProjectCube_Data[TopWBS]").alias("TopWBS"), F.col("ProjectCube_Data[Legal Entity]").alias("Legal Entity"), F.col("[Base_Measure]").alias("Base_Measure"), F.col("SnapShotDate").cast("timestamp").alias("SnapShotDate"))
     df_30 = df_27
     df_30 = df_30.withColumn("GIC", F.expr('LEFT(`GIC`,50)'))
     df_30 = df_30.withColumn("Redbox Customer", F.expr('LEFT(`Redbox Customer`,30)'))
     df_30 = df_30.withColumn("TopWBS", F.expr('LEFT(`TopWBS`,50)'))
     return df_30
 
-@dp.table(name="gold_project_cube_le", comment="Business-level output migration_accelator.testing.project_cube_le", table_properties={"delta.columnMapping.mode": "name"})
+@dp.table(name="gold_project_cube_le", comment="Business-level output main.migration_dev.project_cube_le", table_properties={"delta.columnMapping.mode": "name"})
 def gold_project_cube_le():  # noqa: ANN201
     return spark.read.table("silver_W3")
